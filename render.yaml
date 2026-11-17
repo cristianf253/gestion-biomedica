@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: gestion-biomedica
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: npm install
+    startCommand: node server.js
+    autoDeployTrigger: commit
+    disk:
+      name: datos
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: DATA_DIR
+        value: /data
+      # DATABASE_URL y APP_TOKEN se definen a mano en el panel de Render (no van en este archivo
+      # ni en el repositorio, por seguridad) — ver README.md.
