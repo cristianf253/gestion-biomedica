@@ -2,15 +2,12 @@
   "name": "gestion-biomedica-server",
   "version": "1.0.0",
   "private": true,
-  "description": "Servidor de Gestión Biomédica — Postgres (Supabase) para los datos, disco persistente para los documentos adjuntos.",
+  "description": "Servidor de Gestión Biomédica para Render: SQLite local (node:sqlite) en el disco persistente, sin dependencias externas.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
-    "node": ">=18"
-  },
-  "dependencies": {
-    "pg": "^8.13.1"
+    "node": ">=22.5.0"
   }
 }
