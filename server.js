@@ -17,6 +17,11 @@
 //   DATA_DIR        Carpeta donde se guardan la base de datos y los documentos adjuntos. Por
 //                   defecto "./data" (uso local, igual que en el hospital); en Render se define
 //                   como la ruta del disco persistente (ver render.yaml).
+//   CORS_ORIGIN     Si se define, se permite ese origen (o "*") en las respuestas de la API — hace
+//                   falta solo mientras se migran los datos desde el servidor del hospital (ese
+//                   navegador corre en otro origen y necesita permiso explícito para subir datos
+//                   aquí); la app normal, una vez migrada, siempre se sirve desde el mismo origen
+//                   y no lo necesita. Se puede quitar esta variable después de migrar.
 //
 // Nota sobre el tamaño de los datos: no hay ningún límite fijo de bytes para guardar. El único
 // límite real es el espacio libre en el disco persistente — si se queda sin espacio, el guardado
@@ -36,6 +41,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DB_PATH = path.join(DATA_DIR, 'gestion-biomedica.db');
 const DOCUMENTOS_DIR = path.join(DATA_DIR, 'documentos'); // contenido real de cada documento (ver más abajo)
 const HISTORY_KEEP = 200; // cuántas versiones anteriores conservar en el historial de respaldo
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '';
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(DOCUMENTOS_DIR, { recursive: true });
@@ -174,12 +180,21 @@ function tokenValido(req){
 
 function enviarJson(res, status, obj){
   const body = JSON.stringify(obj);
-  res.writeHead(status, {
+  const headers = {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
     'Cache-Control': 'no-store',
-  });
+  };
+  if(CORS_ORIGIN) headers['Access-Control-Allow-Origin'] = CORS_ORIGIN;
+  res.writeHead(status, headers);
   res.end(body);
+}
+
+// Lista liviana de todos los documentos guardados (solo id/tipo/tamaño/fecha, sin su contenido) —
+// se usa para comparar qué hay guardado aquí contra otro servidor (por ejemplo, durante la
+// migración desde el servidor del hospital, para saber cuáles documentos faltan por subir).
+function listarDocumentos(){
+  return db.prepare('SELECT id, mime, tamano, updated_at FROM documentos ORDER BY id').all();
 }
 
 // Sin límite de bytes fijado de antemano: se recibe y acumula todo lo que envíe el navegador. El
@@ -277,6 +292,15 @@ function servirArchivoEstatico(req, res, urlPath){
 const server = http.createServer(async (req, res)=>{
   const url = req.url || '/';
   try{
+    if(CORS_ORIGIN && req.method === 'OPTIONS'){
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': CORS_ORIGIN,
+        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      });
+      res.end();
+      return;
+    }
     if(url === '/api/health'){
       enviarJson(res, 200, { ok:true });
       return;
@@ -349,6 +373,12 @@ const server = http.createServer(async (req, res)=>{
         return;
       }
       enviarJson(res, 404, { ok:false, code:'not_found' });
+      return;
+    }
+    if(url === '/api/docs' || url.startsWith('/api/docs?')){
+      if(!tokenValido(req)){ enviarJson(res, 401, { ok:false, code:'unauthorized' }); return; }
+      if(req.method !== 'GET'){ enviarJson(res, 405, { ok:false, code:'method_not_allowed' }); return; }
+      enviarJson(res, 200, { ok:true, documentos: listarDocumentos() });
       return;
     }
     if(url.startsWith('/api/docs/')){
