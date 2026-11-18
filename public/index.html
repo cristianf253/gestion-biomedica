@@ -696,6 +696,7 @@ function seedState(){
       { id:'a1', tipo:'correctivo_nuevo', mantenimientoId:'m2', equipoId:'e4', responsableId:'r3', prioridad:'alta', mensaje:'Nueva solicitud de mantenimiento correctivo para Desfibrilador (INV-0102): pantalla no enciende de forma intermitente.', fechaCreacion:'2026-08-20', estado:'nueva' },
       { id:'a2', tipo:'correctivo_nuevo', mantenimientoId:'m3', equipoId:'e5', responsableId:'r2', prioridad:'critica', mensaje:'Nueva solicitud de mantenimiento correctivo PRIORIDAD CRÍTICA para Electrobisturí (INV-0287): no genera corte.', fechaCreacion:'2026-08-26', estado:'vista' }
     ],
+    solicitudesPermisoEquipo:[],
     configIndicadores: configIndicadoresPorDefecto()
   };
 }
@@ -1024,14 +1025,53 @@ function inventarioRestringidoPorServicio(){
   return !!(usr && usuarioTieneAlcanceLimitadoPorServicio() && usr.rol!=='biomedico_administrativo');
 }
 // ¿Puede el usuario con sesión iniciada editar (o eliminar) este equipo específico desde
-// Inventario? Para el Biomédico Administrativo, solo si el equipo pertenece a uno de los
+// Inventario? Para el Biomédico Administrativo, sí si el equipo pertenece a uno de los
 // servicios que tiene asignados directamente en su perfil (no basta con alcanzarlo por un
-// contrato que supervise). Para el resto de roles sigue el permiso general del módulo.
+// contrato que supervise), o si le aprobaron un permiso puntual y todavía sin usar para ESTE
+// equipo (ver solicitarPermisoEquipo / aprobarSolicitudPermiso, más abajo). Para el resto de
+// roles sigue el permiso general del módulo.
 function puedeEditarEquipoInventario(eq){
   if(!puedeEditar('inventario')) return false;
   const usr = usuarioActual();
-  if(usr && usr.rol==='biomedico_administrativo') return responsableTieneServicio(usr, eq && eq.servicio);
+  if(usr && usr.rol==='biomedico_administrativo'){
+    return responsableTieneServicio(usr, eq && eq.servicio) || tienePermisoTemporalVigente(usr, eq);
+  }
   return true;
+}
+// Responsables con rol Biomédico Administrativo que tienen asignado directamente el servicio
+// dado: son los "dueños" de ese servicio a efectos de aprobar el acceso puntual de un colega
+// biomédico administrativo que no lo tenga asignado.
+function biomedicosAdministrativosDeServicio(servicio){
+  return state.responsables.filter(r=>r.rol==='biomedico_administrativo' && responsableTieneServicio(r, servicio));
+}
+// Quién debe decidir una solicitud de permiso para el servicio dado: normalmente el/los
+// Biomédico Administrativo con ese servicio asignado; si ninguno lo tiene asignado, la
+// decisión cae en el Coordinador Biomédico o el Administrador.
+function aprobadoresDeServicio(servicio){
+  const duenos = biomedicosAdministrativosDeServicio(servicio);
+  if(duenos.length>0) return duenos;
+  return state.responsables.filter(r=>r.rol==='administrador' || r.rol==='coordinador_biomedico');
+}
+// ¿Puede el usuario con sesión iniciada aprobar o rechazar esta solicitud de permiso puntual?
+function puedeResolverSolicitudPermiso(sol){
+  const usr = usuarioActual();
+  if(!usr || !sol) return false;
+  return aprobadoresDeServicio(sol.servicio).some(r=>r.id===usr.id);
+}
+// La solicitud de permiso más reciente que este usuario haya hecho para este equipo (o null si
+// nunca ha solicitado uno).
+function solicitudPermisoEquipoDeUsuario(eq, usr){
+  usr = usr || usuarioActual();
+  if(!usr || !eq) return null;
+  const propias = state.solicitudesPermisoEquipo.filter(s=>s.equipoId===eq.id && s.solicitanteId===usr.id);
+  if(propias.length===0) return null;
+  return propias.slice().sort((a,b)=>(b.fechaSolicitud||'').localeCompare(a.fechaSolicitud||''))[0];
+}
+// ¿Tiene este usuario, en este momento, un permiso ya aprobado y todavía sin usar para editar
+// este equipo puntual? (el permiso es de un solo uso: se cierra al guardar el primer cambio).
+function tienePermisoTemporalVigente(usr, eq){
+  if(!usr || !eq) return false;
+  return state.solicitudesPermisoEquipo.some(s=>s.equipoId===eq.id && s.solicitanteId===usr.id && s.estado==='aprobada');
 }
 // Si el usuario con sesión iniciada tiene su rol limitado por contrato, por servicio y/o por
 // contratos supervisados, filtra la lista de equipos dada al subconjunto que le corresponde; si
@@ -1447,6 +1487,9 @@ async function mergeResponsablesNuevos(){
     if(!Array.isArray(state.responsables)) state.responsables = [];
     // Compatibilidad con datos guardados antes de que existiera el módulo de Servicios.
     if(!Array.isArray(state.servicios)) state.servicios = [];
+    // Compatibilidad con datos guardados antes de que existiera el permiso puntual para que un
+    // Biomédico Administrativo edite un equipo fuera de sus servicios asignados.
+    if(!Array.isArray(state.solicitudesPermisoEquipo)) state.solicitudesPermisoEquipo = [];
     const semilla = seedState().responsables || [];
     const usuariosActuales = new Set(state.responsables.map(r=>(r.usuario||'').toLowerCase()).filter(Boolean));
     let agregados = false;
@@ -2730,6 +2773,58 @@ function generarAlertaVencimiento(v){
 function marcarAlerta(id, estado){
   if(!puedeEditar('alertas')){ toast('No tienes permiso para actualizar alertas'); return; }
   commit(s=>{ const a = byId(s.alertas, id); if(a) a.estado = estado; }, 'Alerta actualizada ✓');
+}
+// Crea una solicitud de permiso puntual (de un solo uso) para que el Biomédico Administrativo
+// con sesión iniciada pueda editar un equipo que no pertenece a ninguno de sus servicios
+// asignados, y notifica por Alertas a quien deba aprobarla (ver aprobadoresDeServicio).
+function solicitarPermisoEquipo(id){
+  const usr = usuarioActual();
+  const eq = byId(state.equipos, id);
+  if(!usr || usr.rol!=='biomedico_administrativo' || !eq) return;
+  if(responsableTieneServicio(usr, eq.servicio)){ toast('Ya tienes acceso directo a este equipo'); return; }
+  const existente = solicitudPermisoEquipoDeUsuario(eq, usr);
+  if(existente && existente.estado==='pendiente'){ toast('Ya tienes una solicitud pendiente de aprobación para este equipo'); return; }
+  if(existente && existente.estado==='aprobada'){ toast('Ya tienes un permiso aprobado sin usar para este equipo'); return; }
+  const aprobadores = aprobadoresDeServicio(eq.servicio);
+  if(aprobadores.length===0){ toast('No hay nadie configurado para aprobar el acceso a este servicio'); return; }
+  const motivo = (prompt('¿Para qué necesitas editar este equipo? (opcional, se incluye en la solicitud)')||'').trim();
+  commit(s=>{
+    const solId = uid('sp');
+    s.solicitudesPermisoEquipo.push({ id:solId, equipoId:eq.id, servicio:eq.servicio, solicitanteId:usr.id, motivo, estado:'pendiente', fechaSolicitud:today(), aprobadorId:null, fechaResolucion:null, comentario:'', fechaUso:null });
+    aprobadores.forEach(r=>{
+      s.alertas.unshift({ id:uid('a'), tipo:'permiso_equipo_solicitado', solicitudPermisoId:solId, equipoId:eq.id, responsableId:r.id, prioridad:'media', mensaje:`${usr.nombre} (Biomédico Administrativo) solicita permiso para editar la hoja de vida de ${eq.nombre} (${eq.codigo}), del servicio ${eq.servicio}, que no tiene asignado.${motivo?` Motivo: ${motivo}`:''}`, fechaCreacion:today(), estado:'nueva' });
+    });
+  }, 'Solicitud de permiso enviada ✓');
+}
+// Aprueba una solicitud de permiso: la deja lista para que el solicitante guarde UN cambio en
+// la hoja de vida del equipo (ver submitInvForm / askDeleteEquipo, que la consumen al usarla).
+function aprobarSolicitudPermiso(id){
+  const sol = byId(state.solicitudesPermisoEquipo, id);
+  if(!sol || sol.estado!=='pendiente'){ toast('Esta solicitud ya fue resuelta'); return; }
+  if(!puedeResolverSolicitudPermiso(sol)){ toast('No eres quien debe aprobar esta solicitud'); return; }
+  const usr = usuarioActual();
+  const eq = byId(state.equipos, sol.equipoId);
+  const solicitante = byId(state.responsables, sol.solicitanteId);
+  commit(s=>{
+    const s2 = byId(s.solicitudesPermisoEquipo, id);
+    s2.estado = 'aprobada'; s2.aprobadorId = usr.id; s2.fechaResolucion = today();
+    s.alertas.forEach(a=>{ if(a.solicitudPermisoId===id) a.estado='atendida'; });
+    s.alertas.unshift({ id:uid('a'), tipo:'permiso_equipo_aprobado', solicitudPermisoId:id, equipoId:sol.equipoId, responsableId:sol.solicitanteId, prioridad:'media', mensaje:`${usr.nombre} aprobó tu solicitud de permiso para editar ${eq?eq.nombre:'el equipo'} (${eq?eq.codigo:'-'}). Puedes guardar un cambio en su hoja de vida; el permiso se cierra después de usarlo una vez.`, fechaCreacion:today(), estado:'nueva' });
+  }, `Permiso aprobado para ${solicitante?solicitante.nombre:'el solicitante'} ✓`);
+}
+function rechazarSolicitudPermiso(id){
+  const sol = byId(state.solicitudesPermisoEquipo, id);
+  if(!sol || sol.estado!=='pendiente'){ toast('Esta solicitud ya fue resuelta'); return; }
+  if(!puedeResolverSolicitudPermiso(sol)){ toast('No eres quien debe resolver esta solicitud'); return; }
+  const usr = usuarioActual();
+  const eq = byId(state.equipos, sol.equipoId);
+  const motivoRechazo = (prompt('¿Por qué se rechaza? (opcional)')||'').trim();
+  commit(s=>{
+    const s2 = byId(s.solicitudesPermisoEquipo, id);
+    s2.estado = 'rechazada'; s2.aprobadorId = usr.id; s2.fechaResolucion = today(); s2.comentario = motivoRechazo;
+    s.alertas.forEach(a=>{ if(a.solicitudPermisoId===id) a.estado='atendida'; });
+    s.alertas.unshift({ id:uid('a'), tipo:'permiso_equipo_rechazado', solicitudPermisoId:id, equipoId:sol.equipoId, responsableId:sol.solicitanteId, prioridad:'baja', mensaje:`${usr.nombre} rechazó tu solicitud de permiso para editar ${eq?eq.nombre:'el equipo'} (${eq?eq.codigo:'-'}).${motivoRechazo?` Motivo: ${motivoRechazo}`:''}`, fechaCreacion:today(), estado:'nueva' });
+  }, 'Solicitud rechazada');
 }
 function alertasNoLeidas(){ return state.alertas.filter(a=>a.estado==='nueva').length + vencimientosComputados().filter(v=>v.vencido).length; }
 
@@ -4854,6 +4949,11 @@ function submitInvForm(ev, id){
     : (data.fechaAdquisicion && data.frecuenciaPreventivaMeses ? addMonths(data.fechaAdquisicion, data.frecuenciaPreventivaMeses) : null);
 
   if(id){
+    // Si este biomédico administrativo está editando gracias a un permiso puntual aprobado (no
+    // por tener el servicio del equipo asignado directamente), ese permiso es de un solo uso y se
+    // cierra al guardar este cambio — ver solicitarPermisoEquipo / aprobarSolicitudPermiso.
+    const usrForm = usuarioActual();
+    const usoPermisoTemporal = !!(usrForm && usrForm.rol==='biomedico_administrativo' && !responsableTieneServicio(usrForm, eqExistente.servicio));
     commit(s=>{
       const eq = byId(s.equipos, id);
       Object.assign(eq, data);
@@ -4865,6 +4965,10 @@ function submitInvForm(ev, id){
       // registro técnico, INVIMA y fabricante), así que se quita la marca de "sugerido sin verificar"
       // que pudo haber quedado de una importación por Excel (ver calcularAutocompletadoTecnico).
       eq.datosSugeridosSinVerificar = false;
+      if(usoPermisoTemporal){
+        const sol = s.solicitudesPermisoEquipo.find(x=>x.equipoId===id && x.solicitanteId===usrForm.id && x.estado==='aprobada');
+        if(sol){ sol.estado='usada'; sol.fechaUso = today(); }
+      }
     }, 'Equipo actualizado ✓');
     go('inv-detail',{id},'Detalle');
   } else {
@@ -4908,7 +5012,14 @@ function renderInvDetail(id){
       <button class="btn" onclick="handleGenerarPdfHojaVidaCompleto('${id}')" title="Genera un único PDF que une la hoja de vida con todos los documentos PDF cargados">${icon('filePdf',14)}Descargar PDF completo</button>
       ${puedeEditarEquipoInventario(eq) ? `
       <button class="btn" onclick="go('inv-edit',{id:'${id}'},'Editar')">${icon('edit',14)}Editar</button>
-      <button class="btn btn-danger" onclick="askDeleteEquipo('${id}')">${icon('trash',14)}Eliminar</button>` : ''}
+      <button class="btn btn-danger" onclick="askDeleteEquipo('${id}')">${icon('trash',14)}Eliminar</button>
+      ${(usr && usr.rol==='biomedico_administrativo' && !responsableTieneServicio(usr, eq.servicio)) ? chip('Permiso puntual aprobado: se cierra al guardar un cambio','warning') : ''}
+      ` : (function(){
+        if(!(usr && usr.rol==='biomedico_administrativo')) return '';
+        const sol = solicitudPermisoEquipoDeUsuario(eq, usr);
+        if(sol && sol.estado==='pendiente') return chip('Solicitud de permiso pendiente de aprobación','warning');
+        return `<button class="btn btn-sm" onclick="solicitarPermisoEquipo('${id}')">${icon('bell',14)}Solicitar permiso para editar</button>`;
+      })()}
     </div>
   </div>
 
@@ -5085,8 +5196,16 @@ function renderInvDetail(id){
 function askDeleteEquipo(id){
   const eq = byId(state.equipos, id);
   if(!puedeEditarEquipoInventario(eq)){ toast('No tienes permiso para eliminar equipos del inventario'); return; }
+  const usr = usuarioActual();
+  const usoPermisoTemporal = !!(usr && usr.rol==='biomedico_administrativo' && !responsableTieneServicio(usr, eq.servicio));
   openConfirm('Eliminar equipo', `¿Eliminar "${eq.nombre}" (${eq.codigo}) del inventario? Se conservará el historial de mantenimientos asociados.`, ()=>{
-    commit(s=>{ s.equipos = s.equipos.filter(e=>e.id!==id); }, 'Equipo eliminado del inventario');
+    commit(s=>{
+      s.equipos = s.equipos.filter(e=>e.id!==id);
+      if(usoPermisoTemporal){
+        const sol = s.solicitudesPermisoEquipo.find(x=>x.equipoId===id && x.solicitanteId===usr.id && x.estado==='aprobada');
+        if(sol){ sol.estado='usada'; sol.fechaUso = today(); }
+      }
+    }, 'Equipo eliminado del inventario');
     goHome(); go('inv-menu',{},'Inventario');
   }, { danger:true, confirmLabel:'Eliminar' });
 }
@@ -6804,7 +6923,7 @@ function renderAlertBandeja(){
   <div class="cardgrid" style="grid-template-columns:1fr;">
     ${list.map(a=>`
     <div class="card card-pad" style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;">
-      <div class="tile-icon" style="background:var(--${PRIORIDADES[a.prioridad]?.tone==='critical'?'critical-soft':'accent-soft'});color:var(--${PRIORIDADES[a.prioridad]?.tone==='critical'?'critical':'accent'});flex:0 0 auto;">${icon(a.tipo.includes('correctivo')?'alert':'clock',18)}</div>
+      <div class="tile-icon" style="background:var(--${PRIORIDADES[a.prioridad]?.tone==='critical'?'critical-soft':'accent-soft'});color:var(--${PRIORIDADES[a.prioridad]?.tone==='critical'?'critical':'accent'});flex:0 0 auto;">${icon(a.tipo.includes('correctivo')?'alert':a.tipo.startsWith('permiso_equipo')?'edit':'clock',18)}</div>
       <div style="flex:1 1 260px;min-width:0;">
         <div class="btnrow" style="margin-bottom:6px;">
           ${chip(a.estado==='nueva'?'Nueva':a.estado==='vista'?'Vista':'Atendida', a.estado==='nueva'?'critical':a.estado==='vista'?'warning':'good')}
@@ -6816,6 +6935,13 @@ function renderAlertBandeja(){
       </div>
       <div class="btnrow">
         ${a.mantenimientoId ? `<button class="btn btn-sm" onclick="go('mant-detalle',{id:'${a.mantenimientoId}'},'Mantenimiento')">Ver solicitud</button>` : ''}
+        ${(!a.mantenimientoId && a.equipoId) ? `<button class="btn btn-sm" onclick="go('inv-detail',{id:'${a.equipoId}'},'Detalle')">Ver equipo</button>` : ''}
+        ${(function(){
+          if(a.tipo!=='permiso_equipo_solicitado') return '';
+          const sol = byId(state.solicitudesPermisoEquipo, a.solicitudPermisoId);
+          if(!sol || sol.estado!=='pendiente' || !puedeResolverSolicitudPermiso(sol)) return '';
+          return `<button class="btn btn-sm" onclick="rechazarSolicitudPermiso('${sol.id}')">Rechazar</button><button class="btn btn-sm btn-primary" onclick="aprobarSolicitudPermiso('${sol.id}')">Aprobar permiso</button>`;
+        })()}
         <a class="btn btn-sm" href="${mailtoAlerta(a)}">${icon('mail',13)}Correo</a>
         ${(puedeEditar('alertas') && a.estado==='nueva')?`<button class="btn btn-sm" onclick="marcarAlerta('${a.id}','vista')">Marcar vista</button>`:''}
         ${(puedeEditar('alertas') && a.estado!=='atendida')?`<button class="btn btn-sm btn-primary" onclick="marcarAlerta('${a.id}','atendida')">Atendida</button>`:''}
@@ -8051,7 +8177,7 @@ function askVaciarDatos(){
   if(!puedeRealizarAccion('vaciarDatos')){ toast('No tienes permiso para vaciar todos los datos'); return; }
   openConfirm('Vaciar todos los datos', 'Esta acción eliminará permanentemente todos los equipos, mantenimientos, alertas, responsables, contratos, servicios y protocolos. No se puede deshacer.', ()=>{
     commit(s=>{
-      s.equipos=[]; s.mantenimientos=[]; s.alertas=[]; s.responsables=[]; s.contratos=[]; s.servicios=[]; s.protocolos=[];
+      s.equipos=[]; s.mantenimientos=[]; s.alertas=[]; s.responsables=[]; s.contratos=[]; s.servicios=[]; s.protocolos=[]; s.solicitudesPermisoEquipo=[];
     }, 'Todos los datos fueron eliminados');
     goHome();
   }, { danger:true, confirmLabel:'Vaciar todo' });
