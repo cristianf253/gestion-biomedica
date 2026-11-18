@@ -10,9 +10,17 @@ services:
     disk:
       name: datos
       mountPath: /data
-      sizeGB: 10
+      sizeGB: 20
     envVars:
       - key: DATA_DIR
         value: /data
-      # DATABASE_URL y APP_TOKEN se definen a mano en el panel de Render (no van en este archivo
-      # ni en el repositorio, por seguridad) — ver README.md.
+      # Fija una versión de Node probada y posterior al error conocido de Node 22.5.0 en Render
+      # (comunidad de Render, hilo "Node.js version 22.5 is broken") — node:sqlite ya es estable
+      # desde 22.5, así que cualquier 22.x reciente sirve; se deja esta en vez de "latest" para que
+      # una futura actualización del Node por defecto de Render no cambie el comportamiento sin
+      # haberlo probado antes.
+      - key: NODE_VERSION
+        value: 22.11.0
+      # APP_TOKEN se define a mano en el panel de Render (no va en este archivo ni en el
+      # repositorio, por seguridad) — ver README.md. Ya no hace falta DATABASE_URL: los datos del
+      # inventario se guardan en SQLite dentro del mismo disco persistente que los documentos.
