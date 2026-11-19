@@ -4989,8 +4989,9 @@ function readAccRows(){
 function submitInvForm(ev, id){
   ev.preventDefault();
   if(!puedeEditar('inventario')){ toast('No tienes permiso para modificar el inventario'); return false; }
+  let eqExistente = null;
   if(id){
-    const eqExistente = byId(state.equipos, id);
+    eqExistente = byId(state.equipos, id);
     if(!eqExistente || !puedeEditarEquipoInventario(eqExistente)){ toast('Solo puedes editar equipos de los servicios que tienes asignados'); return false; }
   }
   const f = ev.target;
