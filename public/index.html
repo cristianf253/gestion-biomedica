@@ -1518,84 +1518,179 @@ async function persistLocalOnly(){
   return ok;
 }
 
-async function persist(successMsg){
-  state.meta.lastUpdated = new Date().toISOString();
+/* ---- Cola de guardado con fusión automática en caso de conflicto ----
+   Antes, cuando el servidor avisaba que alguien más había guardado una versión más nueva mientras
+   tanto (409 "conflict" — ver guardarEnServidor), este código simplemente DESCARTABA el cambio que
+   se estaba guardando y recargaba por encima los datos del servidor: si dos personas trabajaban al
+   mismo tiempo desde navegadores distintos, quien guardaba segundo perdía su cambio en silencio
+   (seguía viéndolo en su pantalla un instante, pero nunca quedaba guardado). Esto lo reemplaza por
+   una cola (pendingMutators) de los cambios aplicados en memoria que el servidor todavía no ha
+   confirmado: cuando hay un conflicto, en vez de descartar nada, se toman los datos más recientes
+   que el propio servidor ya devuelve en esa misma respuesta 409 y se les reaplican, en el mismo
+   orden en que se hicieron, todos los cambios locales que aún estén pendientes de confirmar — así
+   el cambio de quien guardó primero y el de quien guardó después quedan los dos, sin importar el
+   orden. Esto es seguro porque, en toda la app, cada mutador recibe el estado sobre el que debe
+   aplicarse como parámetro y busca ahí los registros por su id (ver los `commit(s=>...)` de más
+   abajo) en vez de aferrarse a una copia vieja de un objeto — reaplicar el mismo mutador sobre un
+   estado más reciente hace exactamente lo mismo que la primera vez, pero por encima de los cambios
+   de quien guardó justo antes. */
+let pendingMutators = []; // { fn, msg } — cambios ya aplicados en memoria, aún sin confirmar en el servidor
+let guardadoEnCurso = false;
+
+function commit(mutator, successMsg){
+  mutator(state);
+  pendingMutators.push({ fn: mutator, msg: successMsg===false ? '' : (successMsg || 'Guardado ✓') });
+  // Actualiza la pantalla de inmediato con el cambio que ya está en memoria, sin esperar a que
+  // termine de guardarse en el servidor: así acciones como "Iniciar intervención" o "Cargar
+  // protocolo" se sienten instantáneas aunque el guardado compartido tarde un poco más.
+  render();
+  if(!guardadoEnCurso){
+    guardadoEnCurso = true;
+    cicloGuardado();
+  }
+  // Si ya hay un ciclo de guardado en curso (por ejemplo, de un clic justo anterior), no hace falta
+  // lanzar otro en paralelo: ese ciclo sigue vaciando pendingMutators hasta que no quede nada, así
+  // que recogerá este cambio en su próxima vuelta sin necesidad de una segunda petición a la vez.
+}
+
+// Procesa pendingMutators hasta vaciarla (o hasta decidir rendirse por ahora sin perder nada: todo
+// lo pendiente queda entonces respaldado al menos en este navegador — ver las ramas de abajo).
+async function cicloGuardado(){
   isSaving = true;
+  let conflictosSeguidos = 0;
   try{
-    if(servidorDisponible !== false){
+    while(pendingMutators.length > 0){
+     try{
+      state.meta.lastUpdated = new Date().toISOString();
+
+      if(servidorDisponible === false){
+        // Sin servidor (nunca se pudo alcanzar en esta sesión): solo respaldo local, que ya refleja
+        // todos los cambios pendientes porque todos comparten el mismo objeto `state` en memoria.
+        const lote = pendingMutators.splice(0, pendingMutators.length);
+        const guardado = await persistLocalOnly();
+        saveModeKnown = true; window.__saveMode = 'local'; render();
+        if(!guardado){
+          toast('⚠ No se pudo guardar en este navegador (almacenamiento local bloqueado, en modo privado/incógnito, o sin espacio). Este cambio se perderá si recargas o cierras la página — evita salir de aquí sin exportar tus datos desde Configuración.');
+        } else {
+          lote.forEach(p=>{ if(p.msg) toast(p.msg); });
+        }
+        continue;
+      }
+
+      // Se cuenta ANTES de enviar: es justo lo que queda reflejado en el `state` que se envía ahora
+      // (el envío al servidor congela una foto de `state` en este mismo instante, de forma
+      // síncrona, antes de esperar la respuesta). Si llega un commit() nuevo mientras se espera esa
+      // respuesta, su mutador ya se aplicó a `state` en memoria, pero no venía incluido en ESTE
+      // envío — así que debe seguir pendiente para el siguiente intento, nunca darse por confirmado
+      // de más (eso fue justo el bug: perder en silencio el cambio que llegó mientras se guardaba).
+      const enviados = pendingMutators.length;
       const r = await guardarEnServidor();
+
       if(r.ok){
+        const lote = pendingMutators.splice(0, enviados);
         await persistLocalOnly();
         readOnlyMode = false; saveModeKnown = true; window.__saveMode = 'live'; servidorDisponible = true;
         render();
-        if(successMsg) toast(successMsg);
-        return;
+        lote.forEach(p=>{ if(p.msg) toast(p.msg); });
+        conflictosSeguidos = 0;
+        continue;
       }
-      if(r.code === 'conflict'){
-        toast('Alguien más guardó cambios desde otro navegador justo antes; sincronizando los datos más recientes…');
-        setTimeout(()=>{ loadInitialState().then(render); }, 600);
-        return;
+
+      if(r.code === 'conflict' && r.servidor && r.servidor.state){
+        conflictosSeguidos++;
+        if(conflictosSeguidos > 50){
+          // Esto ya no es la concurrencia normal de varias personas trabajando a la vez (eso se
+          // resuelve fusionando y reintentando, sin límite, ver abajo) — es un número de conflictos
+          // seguidos tan alto que algo más está mal. Para no quedarse reintentando para siempre en
+          // ese caso extremo, se deja de insistir por ahora SIN descartar nada: el cambio queda
+          // fusionado y a salvo en este navegador, y se retomará solo con el siguiente guardado.
+          const lote = pendingMutators.splice(0, pendingMutators.length);
+          await persistLocalOnly();
+          window.__saveMode = 'local'; saveModeKnown = true; render();
+          toast('⚠ No se pudo terminar de combinar los cambios con el servidor tras muchos intentos; tu cambio quedó a salvo en este navegador y se terminará de guardar automáticamente en el próximo guardado.');
+          continue;
+        }
+        toast('Alguien más guardó cambios desde otro navegador justo antes; combinando tu cambio con el más reciente…');
+        state = r.servidor.state;
+        servidorVersion = r.servidor.version;
+        pendingMutators.forEach(p=>p.fn(state)); // reaplica TODO lo pendiente sobre los datos recién llegados
+        render();
+        // Espera con retroceso exponencial (con algo de variación aleatoria) antes de reintentar:
+        // así, si hay MUCHAS personas guardando al mismo tiempo, no todas vuelven a chocar juntas en
+        // el siguiente intento — cada conflicto seguido espera un poco más que el anterior, hasta un
+        // tope, en vez de reintentar siempre al mismo ritmo fijo.
+        const espera = Math.min(150 * Math.pow(1.4, conflictosSeguidos - 1), 4000) + Math.random()*250;
+        await new Promise(res=>setTimeout(res, espera));
+        continue;
       }
+
       if(r.code === 'unauthorized'){
+        const lote = pendingMutators.splice(0, pendingMutators.length);
         await persistLocalOnly(); saveModeKnown = true; render();
-        toast('No se guardó en el servidor (falta el código de acceso); se guardó localmente en este navegador.');
-        return;
+        if(lote.length) toast('No se guardó en el servidor (falta el código de acceso); se guardó localmente en este navegador.');
+        continue;
       }
+
       if(r.code === 'disk_full'){
         // No hay ningún límite de tamaño fijado de antemano: el servidor acepta guardar cualquier
         // cantidad de datos. Esto solo puede pasar por la única razón real que le queda para fallar
         // por "demasiado grande" — que el disco del computador donde corre el servidor se quedó sin
-        // espacio libre. No tiene sentido reintentar (fallará igual hasta que se libere espacio ahí),
-        // así que se avisa con un mensaje honesto sobre la causa real y qué hacer al respecto.
+        // espacio libre. No tiene sentido reintentar ya mismo (fallará igual hasta que se libere
+        // espacio ahí), así que se avisa con un mensaje honesto y se deja de reintentar por ahora.
+        const lote = pendingMutators.splice(0, pendingMutators.length);
         const guardado = await persistLocalOnly();
         window.__saveMode = 'local'; saveModeKnown = true; render();
         toast(guardado
           ? '⚠ El servidor se quedó sin espacio en su disco: este cambio no se pudo guardar ahí, solo en este navegador. Pide a quien administra el computador del servidor que libere espacio en el disco (por ejemplo, borrando archivos que ya no necesite) para poder volver a guardar cambios compartidos.'
           : '⚠ El servidor se quedó sin espacio en su disco y este cambio tampoco se pudo guardar en este navegador — se perderá si recargas o cierras la página. Expórtalo ya desde Configuración, y pide a quien administra el computador del servidor que libere espacio en el disco cuanto antes.');
-        return;
+        continue;
       }
-      // error de red/servidor: un reintento corto, luego respaldo local (igual que antes con el
-      // guardado compartido) — sin marcar el servidor como no disponible de forma permanente por un
-      // solo fallo puntual, para no dejar de intentarlo en el próximo guardado.
+
+      // Error de red/servidor: un reintento corto (igual que antes), y si vuelve a fallar se deja de
+      // insistir por ahora y se respalda localmente — sin marcar el servidor como no disponible de
+      // forma permanente por un solo fallo puntual, para no dejar de intentarlo en el próximo guardado.
+      let r2 = null;
+      const enviadosReintento = pendingMutators.length; // misma razón que "enviados" más arriba
       try{
         await new Promise(res => setTimeout(res, 700));
-        const r2 = await guardarEnServidor();
-        if(r2.ok){
-          await persistLocalOnly(); readOnlyMode=false; saveModeKnown=true; window.__saveMode='live'; servidorDisponible=true; render();
-          if(successMsg) toast(successMsg);
-          return;
-        }
+        r2 = await guardarEnServidor();
       }catch(e){}
+      if(r2 && r2.ok){
+        const lote = pendingMutators.splice(0, enviadosReintento);
+        await persistLocalOnly(); readOnlyMode=false; saveModeKnown=true; window.__saveMode='live'; servidorDisponible=true; render();
+        lote.forEach(p=>{ if(p.msg) toast(p.msg); });
+        conflictosSeguidos = 0;
+        continue;
+      }
+      const lote = pendingMutators.splice(0, pendingMutators.length);
       const guardado = await persistLocalOnly();
       window.__saveMode = 'local'; saveModeKnown = true; render();
       toast(guardado
         ? 'No se pudo conectar con el servidor; este cambio se guardó solo en este navegador.'
         : '⚠ No se pudo guardar en el servidor NI en este navegador — no pierdas de vista este cambio y exporta tus datos desde Configuración en cuanto puedas.');
-      return;
+     } catch(errInesperado){
+      // Defensa ante cualquier error que no se haya previsto arriba: nunca debe convertirse en un
+      // reintento infinito (por eso se vacía pendingMutators aquí también, igual que en las demás
+      // ramas que se rinden por ahora) — el cambio sigue a salvo en `state` y se respalda solo en
+      // este navegador; el próximo guardado que dispare cualquier otro cambio lo recogerá de nuevo.
+      console.error('Error inesperado guardando', errInesperado);
+      pendingMutators.splice(0, pendingMutators.length);
+      try{ await persistLocalOnly(); }catch(e){}
+      window.__saveMode = 'local'; saveModeKnown = true; render();
+      toast('⚠ Ocurrió un error inesperado guardando este cambio; quedó respaldado en este navegador. Si se repite, exporta tus datos desde Configuración y avisa a quien administra la app.');
+      break;
+     }
     }
-    // Sin servidor (nunca se pudo alcanzar en esta sesión): solo respaldo local.
-    const guardado = await persistLocalOnly();
-    saveModeKnown = true; window.__saveMode = 'local'; render();
-    if(!guardado){
-      toast('⚠ No se pudo guardar en este navegador (almacenamiento local bloqueado, en modo privado/incógnito, o sin espacio). Este cambio se perderá si recargas o cierras la página — evita salir de aquí sin exportar tus datos desde Configuración.');
-    } else if(successMsg){
-      toast(successMsg);
+  } finally {
+    isSaving = false;
+    guardadoEnCurso = false;
+    // Si algo llegó justo mientras se cerraba este ciclo (entre la última vuelta y aquí), se
+    // procesa de inmediato en un nuevo ciclo en vez de quedarse sin disparar hasta el próximo commit().
+    if(pendingMutators.length > 0){
+      guardadoEnCurso = true;
+      cicloGuardado();
     }
-  } finally { isSaving = false; }
-}
-
-function commit(mutator, successMsg){
-  mutator(state);
-  // Actualiza la pantalla de inmediato con el cambio que ya está en memoria, sin esperar a que
-  // termine de guardarse en el servidor: antes render() solo se llamaba desde dentro de persist(),
-  // después de esperar el viaje completo de ida y vuelta al servidor (que manda TODOS los datos de
-  // la app, incluyendo cualquier documento adjunto ya guardado, no solo lo que cambió) — así que
-  // acciones como "Iniciar intervención" o "Cargar protocolo" se sentían lentas aunque el cambio en
-  // sí fuera pequeño, porque la pantalla se quedaba esperando esa respuesta para reflejarlo. persist()
-  // sigue corriendo en segundo plano y vuelve a llamar a render() cuando confirma que se guardó (o si
-  // hace falta avisar de un problema), pero eso ya no bloquea la respuesta visual de la acción.
-  render();
-  persist(successMsg===false ? '' : (successMsg || 'Guardado ✓')); // successMsg===false: guardar sin mostrar aviso (ej. clics rápidos y repetidos en un checklist)
+  }
 }
 
 /* ---------------- Navegación ---------------- */
