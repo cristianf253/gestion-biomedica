@@ -284,7 +284,15 @@ function servirArchivoEstatico(req, res, urlPath){
   fs.readFile(resuelto, (err, contenido)=>{
     if(err){ res.writeHead(404); res.end('No encontrado'); return; }
     const ext = path.extname(resuelto).toLowerCase();
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    // Sin esta cabecera, al no haber ninguna pista de caché (ni Cache-Control ni ETag ni
+    // Last-Modified), algunos navegadores igual guardaban esta página como si pudiera cachearse
+    // "a su criterio" y seguían sirviendo una copia vieja de index.html tras una actualización —
+    // incluso con una recarga normal, sin que la persona lo notara (el mensaje de un arreglo
+    // anterior seguía apareciendo porque el código que corría en el navegador era el de antes).
+    // Como toda esta app es una sola página (todo el HTML/CSS/JS va en index.html, sin archivos
+    // sueltos pesados que valga la pena cachear), siempre se le pide al navegador que vuelva a
+    // pedirla, para que cada despliegue nuevo llegue de inmediato a quien recargue la página.
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': 'no-store' });
     res.end(contenido);
   });
 }
