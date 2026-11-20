@@ -3440,6 +3440,7 @@ function renderScreen(scr){
       case 'config-completar-recomendaciones': return renderCompletarRecomendaciones();
       case 'config-carga-confianza-2026': return renderCargaConfianza2026();
       case 'config-conciliar-consulta-externa': return renderConciliarConsultaExterna();
+      case 'config-agregar-bombas-infusion': return renderAgregarBombasInfusionFaltantes();
       default: return renderHome();
     }
   }catch(e){
@@ -7596,6 +7597,7 @@ function renderConfigMenu(){
     ${usr && usr.rol==='administrador' ? tileButton({icon:'clipboard', title:'Completar Recomendaciones', desc:'Completa la casilla "Recomendaciones" de los equipos que no la tienen, copiándola de un equipo propio del mismo modelo o usando un texto general si no hay ninguno.', onclick:"go('config-completar-recomendaciones',{},'Completar Recomendaciones')"}) : ''}
     ${usr && usr.rol==='administrador' ? tileButton({icon:'upload', title:'Carga de casos de confianza 2026', desc:'Herramienta temporal: crea los 89 mantenimientos preventivos de 2026 confirmados en la auditoría de reportes de Drive. Bórrala cuando termines de usarla.', onclick:"go('config-carga-confianza-2026',{},'Carga de casos de confianza 2026')"}) : ''}
     ${usr && usr.rol==='administrador' ? tileButton({icon:'building', title:'Conciliar Consulta Externa', desc:'Herramienta temporal: contrarresta el inventario contra CONS_EXTERN.xlsx (crea, reasigna y marca pendiente de ubicar). Bórrala cuando termines de usarla.', onclick:"go('config-conciliar-consulta-externa',{},'Conciliar Consulta Externa')"}) : ''}
+    ${usr && usr.rol==='administrador' ? tileButton({icon:'plus-circle', title:'Agregar Bombas de Infusión faltantes', desc:'Herramienta temporal: crea las 22 bombas de infusión MEDCAPTAIN HP 60 que faltaban según los listados de servicios revisados. Bórrala cuando termines de usarla.', onclick:"go('config-agregar-bombas-infusion',{},'Agregar Bombas de Infusión')"}) : ''}
     ${puedeRealizarAccion('vaciarDatos') ? tileButton({icon:'trash', title:'Vaciar todos los datos', desc:'Elimina equipos, mantenimientos, alertas, responsables y contratos.', onclick:"askVaciarDatos()"}) : ''}
   </div>`;
 }
@@ -9142,6 +9144,89 @@ async function iniciarConciliarConsultaExterna(){
   toast(resultado.error ? ('Ocurrió un problema: '+resultado.error) : `Conciliación terminada: ${resultado.creados} creados, ${resultado.reasignados} reasignados, ${resultado.movidos} movidos a pendiente`);
 }
 /* ===== FIN BLOQUE TEMPORAL: Conciliar inventario de Consulta Externa ===== */
+
+/* ===== BLOQUE TEMPORAL: Agregar bombas de infusión faltantes (MEDCAPTAIN HP 60) ===== */
+let agregarBombasInfusionEstado = null; // null=sin iniciar; 'corriendo'; o resultado
+const BOMBAS_INFUSION_CREAR = [{"serie": "9024012001207", "servicio": "MEDICO QUIRURGICAS I", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001198", "servicio": "MEDICO QUIRURGICAS I", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001197", "servicio": "MEDICO QUIRURGICAS I", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001196", "servicio": "MEDICO QUIRURGICAS I", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001208", "servicio": "MEDICO QUIRURGICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001185", "servicio": "MEDICO QUIRURGICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001181", "servicio": "MEDICO QUIRURGICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001174", "servicio": "MEDICO QUIRURGICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001152", "servicio": "MEDICO QUIRURGICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001213", "servicio": "MEDICO QUIRURGICAS III", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001209", "servicio": "QUIRURGICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001204", "servicio": "QUIRURGICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001172", "servicio": "QUIRURGICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001169", "servicio": "QUIRURGICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001157", "servicio": "QUIRURGICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001154", "servicio": "QUIRURGICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001146", "servicio": "QUIRURGICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001144", "servicio": "QUIRURGICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001201", "servicio": "TRAUMATOLOGIA", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001202", "servicio": "TRAUMATOLOGIA", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001206", "servicio": "TRAUMATOLOGIA", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001199", "servicio": "TRAUMATOLOGIA", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001205", "servicio": "MEDICAS I", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001187", "servicio": "MEDICAS I", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001184", "servicio": "MEDICAS I", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001171", "servicio": "MEDICAS I", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001167", "servicio": "MEDICAS I", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001191", "servicio": "MEDICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001190", "servicio": "MEDICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001189", "servicio": "MEDICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001188", "servicio": "MEDICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001182", "servicio": "MEDICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001180", "servicio": "MEDICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001179", "servicio": "MEDICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001159", "servicio": "MEDICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001143", "servicio": "MEDICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001142", "servicio": "MEDICAS II", "frecuenciaPreventivaMeses": 6}, {"serie": "9024012001141", "servicio": "MEDICAS II", "frecuenciaPreventivaMeses": 6}];
+function renderAgregarBombasInfusionFaltantes(){
+  const usr = usuarioActual();
+  if(!usr || usr.rol!=='administrador') return emptyState('alert','Sin permiso','Solo un Administrador puede usar esta herramienta.');
+  const est = agregarBombasInfusionEstado;
+  return `
+  <div class="page-head"><h1>Agregar Bombas de Infusión faltantes</h1><p>Herramienta temporal: crea ${BOMBAS_INFUSION_CREAR.length} equipos "BOMBA DE INFUSION" (marca MEDCAPTAIN, modelo HP 60) que aparecen en los listados de servicios revisados pero no estaban creados en el aplicativo, identificados por su número de serie.</p></div>
+  ${!est ? `
+    <div class="card card-pad">
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:14px;"><b>Este botón hay que presionarlo tú mismo, desde tu navegador</b> — es una escritura masiva a los datos compartidos del servidor. Es seguro presionarlo más de una vez.</p>
+      <div class="btnrow"><button class="btn btn-primary" onclick="iniciarAgregarBombasInfusionFaltantes()">${icon('upload',14)}Agregar Bombas de Infusión</button></div>
+    </div>`
+  : est==='corriendo' ? `<div class="card card-pad" style="text-align:center;color:var(--text-2);">${icon('clock',18)} Agregando…</div>`
+  : `
+    <div class="card card-pad">
+      <div class="section-title" style="margin-top:0;">Resultado</div>
+      <p style="font-size:13.5px;line-height:1.8;">
+        <b>${est.creados}</b> bomba(s) de infusión creada(s).<br/>
+        <b>${est.yaExistian}</b> ya existían (por número de serie) y no se duplicaron.
+        ${est.error?`<br/><b style="color:var(--critical);">Error:</b> ${esc(est.error)}`:'<br/>Guardado correctamente en el servidor.'}
+      </p>
+      <div class="btnrow" style="margin-top:14px;"><button class="btn" onclick="agregarBombasInfusionEstado=null; render();">${icon('refresh',14)}Volver</button></div>
+    </div>`}
+  `;
+}
+async function iniciarAgregarBombasInfusionFaltantes(){
+  const usr = usuarioActual();
+  if(!usr || usr.rol!=='administrador'){ toast('Solo un Administrador puede usar esta herramienta'); return; }
+  agregarBombasInfusionEstado = 'corriendo';
+  render();
+  const resultado = { creados:0, yaExistian:0, error:null };
+  try{
+    let intentos = 0, terminado = false;
+    while(intentos<5 && !terminado){
+      intentos++;
+      await loadInitialState();
+      let creados=0, yaExistian=0;
+
+      BOMBAS_INFUSION_CREAR.forEach((info, idx)=>{
+        const yaExiste = state.equipos.some(e=> normTxt(e.serie)===normTxt(info.serie) );
+        if(yaExiste){ yaExistian++; return; }
+        const nuevo = {
+          id: uid('e'), nombre: 'BOMBA DE INFUSION', tipo: 'BOMBA DE INFUSION', codigo: 'NR', marca: 'MEDCAPTAIN', modelo: 'HP 60', serie: info.serie,
+          servicio: info.servicio, ubicacion: '', estado: 'operativo', motivoFueraServicio:'',
+          riesgo:'', registroInvima:null, registroSanitario:'', certificacionDian:'', propiedad:'',
+          contratoMantenimientoId:null, responsableId:null, fechaAdquisicion:null, vidaUtilAnios:null,
+          garantiaTiempo:'', garantiaFechaExpiracion:null, cambioCeldaOxigeno:'',
+          frecuenciaPreventivaMeses: info.frecuenciaPreventivaMeses, fechaUltimoPreventivo:null, fechaProximoPreventivo:null, notas:''
+        };
+        const auto = calcularAutocompletadoTecnico(nuevo.marca, nuevo.modelo, null);
+        Object.assign(nuevo, auto.campos);
+        if(auto.sugerido) nuevo.datosSugeridosSinVerificar = true;
+        state.equipos.push(nuevo);
+        creados++;
+      });
+
+      const r = await guardarEnServidor();
+      if(r.ok){
+        await persistLocalOnly();
+        resultado.creados = creados; resultado.yaExistian = yaExistian;
+        terminado = true;
+      } else if(r.code === 'conflict'){
+        continue;
+      } else {
+        resultado.error = 'No se pudo guardar en el servidor ('+(r.code||'error')+')';
+        terminado = true;
+      }
+    }
+    if(!terminado && !resultado.error) resultado.error = 'Conflicto de guardado persistente tras varios intentos; vuelve a intentarlo.';
+    await loadInitialState();
+    render();
+  }catch(e){
+    resultado.error = e.message||String(e);
+  }
+  agregarBombasInfusionEstado = resultado;
+  render();
+  toast(resultado.error ? ('Ocurrió un problema: '+resultado.error) : `Bombas de infusión agregadas: ${resultado.creados} creadas, ${resultado.yaExistian} ya existían`);
+}
+/* ===== FIN BLOQUE TEMPORAL: Agregar bombas de infusión faltantes ===== */
+
 init();
 </script>
 </body>
