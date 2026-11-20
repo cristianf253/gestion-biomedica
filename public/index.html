@@ -1190,6 +1190,17 @@ if(window.pdfjsLib){ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.clo
 
 function uid(prefix){ return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 function today(){ return new Date().toISOString().slice(0,10); }
+// Un preventivo pendiente se considera realmente "vencido" (crítico/rojo) solo cuando el MES
+// programado ya quedó atrás por completo (estamos en un mes posterior). Si el mes programado es el
+// mes actual, se muestra como "próximo a vencer" (naranja) aunque el día exacto de la fecha
+// programada ya haya pasado dentro de ese mismo mes — la programación exige un día puntual, pero en
+// la práctica el mantenimiento puede hacerse cualquier día del mes, así que no tiene sentido marcarlo
+// en rojo desde el día 2 del mes. Recién al pasar al mes siguiente sin haberse completado, se vuelve
+// crítico.
+function pendienteVencidoPorMes(fechaProgramada, hoy){
+  if(!fechaProgramada) return false;
+  return fechaProgramada.slice(0,7) < (hoy||today()).slice(0,7);
+}
 // ¿El equipo ya está fuera de garantía? Solo se puede determinar si tiene registrada una fecha de
 // expiración de garantía; sin esa fecha no se asume nada.
 function equipoFueraDeGarantia(eq){ return !!(eq && eq.garantiaFechaExpiracion && eq.garantiaFechaExpiracion < today()); }
@@ -3426,6 +3437,7 @@ function renderScreen(scr){
       case 'config-protocolo-add': return renderProtocoloForm(null);
       case 'config-protocolo-edit': return renderProtocoloForm(scr.params.id);
       case 'config-recuperar-docs': return renderRecuperarDocumentos();
+      case 'config-carga-confianza-2026': return renderCargaConfianza2026();
       default: return renderHome();
     }
   }catch(e){
@@ -3537,7 +3549,7 @@ function renderInvList(){
     if(m.estado==='completado') tone='good';
     else if(m.estado==='cancelado') tone='neutral';
     else if(m.estado==='en_proceso') tone='accent';
-    else if(m.estado==='pendiente'){ const venc = m.fechaProgramada < hoyInv; tone = venc?'critical':'warning'; }
+    else if(m.estado==='pendiente'){ const venc = pendienteVencidoPorMes(m.fechaProgramada, hoyInv); tone = venc?'critical':'warning'; }
     const extra = items.length>1 ? `<span class="crono-extra">+${items.length-1}</span>` : '';
     return `<td class="crono-cell crono-cell-filled"><button class="crono-fill tone-${tone}" onclick="event.stopPropagation(); go('mant-detalle',{id:'${m.id}'},'Mantenimiento')" title="${esc(eq.nombre)} · ${esc(MANT_ESTADOS[m.estado]?.label||m.estado)} · ${fmtDate(m.fechaProgramada)}">${extra}</button></td>`;
   }
@@ -6554,7 +6566,7 @@ function renderCronoView(tipo){
     if(m.estado==='completado'){ tone='good'; label='✓'; }
     else if(m.estado==='cancelado'){ tone='neutral'; label='×'; }
     else if(m.estado==='en_proceso'){ tone='accent'; label='•'; }
-    else if(m.estado==='pendiente'){ const venc = m.fechaProgramada < hoy; tone = venc?'critical':'warning'; label = venc?'!':'•'; }
+    else if(m.estado==='pendiente'){ const venc = pendienteVencidoPorMes(m.fechaProgramada, hoy); tone = venc?'critical':'warning'; label = venc?'!':'•'; }
     const extra = items.length>1 ? `<span class="crono-extra">+${items.length-1}</span>` : '';
     return `<td class="crono-cell"><button class="crono-dot tone-${tone}" onclick="go('mant-detalle',{id:'${m.id}'},'Mantenimiento')" title="${esc(eq.nombre)} · ${esc(MANT_ESTADOS[m.estado]?.label||m.estado)} · ${fmtDate(m.fechaProgramada)}">${label}${extra}</button></td>`;
   }
@@ -7458,6 +7470,7 @@ function askDeleteResponsable(id){
 
 /* ================= CONFIGURACIÓN ================= */
 function renderConfigMenu(){
+  const usr = usuarioActual();
   return `
   <div class="page-head"><h1>Configuración</h1><p>Estado del guardado, datos de ejemplo y exportación.</p></div>
   <div class="card card-pad" style="margin-bottom:16px;">
@@ -7475,6 +7488,7 @@ function renderConfigMenu(){
     ${tileButton({icon:'download', title:'Exportar datos', desc:'Descarga una copia de todo el inventario y mantenimientos en formato JSON.', onclick:"exportarDatos()"})}
     ${tileButton({icon:'box', title:'Cargar datos de ejemplo', desc:'Restablece la aplicación con un conjunto de datos de demostración.', onclick:"askCargarEjemplo()"})}
     ${tileButton({icon:'upload', title:'Recuperar documentos', desc:'Sube al servidor los documentos adjuntos que solo quedaron guardados en este navegador (por eso no se ven desde otros equipos).', onclick:"go('config-recuperar-docs',{},'Recuperar documentos')"})}
+    ${usr && usr.rol==='administrador' ? tileButton({icon:'upload', title:'Carga de casos de confianza 2026', desc:'Herramienta temporal: crea los 89 mantenimientos preventivos de 2026 confirmados en la auditoría de reportes de Drive. Bórrala cuando termines de usarla.', onclick:"go('config-carga-confianza-2026',{},'Carga de casos de confianza 2026')"}) : ''}
     ${puedeRealizarAccion('vaciarDatos') ? tileButton({icon:'trash', title:'Vaciar todos los datos', desc:'Elimina equipos, mantenimientos, alertas, responsables y contratos.', onclick:"askVaciarDatos()"}) : ''}
   </div>`;
 }
@@ -8701,6 +8715,111 @@ async function init(){
   initStickyHScroll();
   runSplash();
 }
+/* ===== BLOQUE TEMPORAL: Carga de casos de confianza 2026 (auditoría de reportes Drive vs. mantenimientos,
+   ver conversación con el usuario) — crea un registro de mantenimiento preventivo "completado" para cada
+   equipo de la lista, correspondiente a un informe de mantenimiento real (PDF) encontrado en Google Drive
+   para ese equipo y ese mes de 2026, que no tenía ningún mantenimiento completado registrado en la app para
+   ese mismo mes. El código del PDF no coincidía EXACTO con el código del equipo en el inventario (por eso no
+   se detectó antes) pero sí es un "match" de alta confianza: mismo tipo de equipo y código casi idéntico
+   (diferencia de 1-2 caracteres, probablemente un error de tipeo al escribir el código en el PDF o en el
+   inventario). Cada equipo ya viene resuelto por su id real (no por código, para evitar ambigüedad). No se
+   toca nada de 2025 ni de los casos de "alta confianza" con más de un equipo candidato o con códigos
+   duplicados en el inventario — eso se reporta aparte. El día exacto del mes no se conoce sin abrir cada PDF
+   uno por uno, así que se usa el día 15 por convención (coincide con el día que ya usa la mayoría de los
+   mantenimientos completados en masa de este mismo inventario). Es seguro presionar el botón más de una vez:
+   antes de crear cada registro, comprueba si el equipo ya tiene un preventivo completado ese mismo mes (si ya
+   existe, no crea un duplicado). Bórralo cuando termines de aplicarlo. ===== */
+let cargaConfianza2026Estado = null; // null=sin iniciar; 'corriendo'; o resultado
+const CASOS_CONFIANZA_2026_DATA = [{"pdf": "CAMA ELECTRICA AF0205698.pdf", "anio": 2026, "mes": 10, "equipoId": "e_mwcqn4oj36url", "codigo": "205698", "nombre": "CAMA ELECTRICA"}, {"pdf": "FLUJOMETRO AFCASA0080920-03.pdf", "anio": 2026, "mes": 10, "equipoId": "e_mwcqn4oj87pfz", "codigo": "CASA008092002", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF2300679.pdf", "anio": 2026, "mes": 10, "equipoId": "e_mwcqn4oiczw3r", "codigo": "2300670", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF0977.pdf", "anio": 2026, "mes": 10, "equipoId": "e_mwcqn4oi7bf3x", "codigo": "977", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF2300487.pdf", "anio": 2026, "mes": 10, "equipoId": "e_mwcqn4oie5ord", "codigo": "2300485", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF0969.pdf", "anio": 2026, "mes": 10, "equipoId": "e_mwcqn4oiswxnu", "codigo": "969", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AFFLUURGADUL07.pdf", "anio": 2026, "mes": 9, "equipoId": "e_mwcqn4oj2sxow", "codigo": "FLURGADUL 07", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AFFLUURGADUL05.pdf", "anio": 2026, "mes": 9, "equipoId": "e_mwcqn4oj2wur0", "codigo": "FLURGADUL 05", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AFFLUURGADUL02.pdf", "anio": 2026, "mes": 9, "equipoId": "e_mwcqn4oj3tmh2", "codigo": "FLURGADUL 02", "nombre": "FLUJOMETRO"}, {"pdf": "TERMOHIGROMETRO AFMC166008-188.pdf", "anio": 2026, "mes": 9, "equipoId": "e_mwcqn4ojim9tu", "codigo": "MC166008-0188", "nombre": "TERMOHIGROMETRO"}, {"pdf": "FLUJOMETRO AFFLUURGADUL04.pdf", "anio": 2026, "mes": 9, "equipoId": "e_mwcqn4oj6cy60", "codigo": "FLURGADUL 04", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF826A.pdf", "anio": 2026, "mes": 9, "equipoId": "e_mwcqn4oh2yqlx", "codigo": "826", "nombre": "FLUJOMETRO"}, {"pdf": "TERMOMETRO DIGITAL AFMC16609010-EQBIO0014.pdf", "anio": 2026, "mes": 8, "equipoId": "e_mwcqn4oi3vq1h", "codigo": "MC16609010-EQBIO014", "nombre": "TERMOHIGROMETRO"}, {"pdf": "TERMOMETRO DIGITAL AFMC16609010-0332 - MC166007-0146.pdf", "anio": 2026, "mes": 8, "equipoId": "e_mwcqn4oh7yqv5", "codigo": "MC166007-0156", "nombre": "TERMOHIGROMETRO"}, {"pdf": "TERMOHIGROMETRO AFMC16609010-0588 - THNEFR01.pdf", "anio": 2026, "mes": 8, "equipoId": "e_mwcqn4oi2ro1r", "codigo": "MC16609010-0584", "nombre": "TERMOHIGROMETRO"}, {"pdf": "TERMOMETRO DIGITAL AFMC16609010-0126 - 4597.pdf", "anio": 2026, "mes": 8, "equipoId": "e_mwcqn4oj7hggu", "codigo": "MC16609010-0526", "nombre": "TERMOHIGROMETRO"}, {"pdf": "TERMOHIGROMETRO AFMC16609010-0518 - THLAB01.pdf", "anio": 2026, "mes": 8, "equipoId": "e_mwcqn4ohdyuat", "codigo": "MC16609010-0516", "nombre": "TERMOHIGROMETRO"}, {"pdf": "TERMOHIGROMETRO AFMC16609010-0144-1037.pdf", "anio": 2026, "mes": 8, "equipoId": "e_mwcqn4ohzrd78", "codigo": "MC16609010-0144/1037", "nombre": "TERMOHIGROMETRO"}, {"pdf": "TERMOMETRO DIGITAL AF0329.pdf", "anio": 2026, "mes": 8, "equipoId": "e_mwcqn4ojl5dye", "codigo": "329", "nombre": "TERMOMETRO"}, {"pdf": "TERMOMETRO DIGITAL AFMC166007-0129 - 4595.pdf", "anio": 2026, "mes": 8, "equipoId": "e_mwcqn4ohnpazh", "codigo": "MC166007-0121", "nombre": "TERMOHIGROMETRO"}, {"pdf": "TERMOHIGROMETRO AFMC16609010-EQBIO062.pdf", "anio": 2026, "mes": 8, "equipoId": "e_mwcqn4oh7q3wx", "codigo": "MC16609010-EQBIO002", "nombre": "TERMOHIGROMETRO"}, {"pdf": "REGULADOR DE OXIGENO AF562-MC16609010-0587.pdf", "anio": 2026, "mes": 7, "equipoId": "e_mwcqn4ojg2pkg", "codigo": "562/MC16609010-0587", "nombre": "REGULADOR DE OXIGENO"}, {"pdf": "REGULADOR DE YUGO SN85283.pdf", "anio": 2026, "mes": 7, "equipoId": "e_mwcqn4oin9rhd", "codigo": "852", "nombre": "REGULADOR DE VACIO"}, {"pdf": "REGULADOR DE OXIGENO AF0973.pdf", "anio": 2026, "mes": 7, "equipoId": "e_mwcqn4ojo03oy", "codigo": "973", "nombre": "REGULADOR DE OXIGENO"}, {"pdf": "REGULADOR DE OXIGENO AF2301137.pdf", "anio": 2026, "mes": 7, "equipoId": "e_mwcqn4oh19my7", "codigo": "2301637", "nombre": "REGULADOR DE VACIO"}, {"pdf": "REGULADOR DE YUGOAF2300748.pdf", "anio": 2026, "mes": 7, "equipoId": "e_mwcqn4ohe1nwl", "codigo": "23300748", "nombre": "REGULADOR DE YUGO"}, {"pdf": "BALANZA NEONATAL AF220628.pdf", "anio": 2026, "mes": 6, "equipoId": "e_mwcqn4ojz8mm4", "codigo": "2201628", "nombre": "BALANZA DIGITAL PESA BEBE"}, {"pdf": "EQUIPO DE ORGANOS AF2200149-5302.pdf", "anio": 2026, "mes": 6, "equipoId": "e_mwcqn4oi11mqx", "codigo": "2200149/5302", "nombre": "EQUIPO DE ORGANOS DE LOS SENTIDOS"}, {"pdf": "EQUIPO DE ORGANOS AF4776-2200708.pdf", "anio": 2026, "mes": 6, "equipoId": "e_mwcqn4oigjx5w", "codigo": "4776/2200708", "nombre": "EQUIPO DE ORGANOS DE LOS SENTIDOS"}, {"pdf": "EQUIPO DE ORGANOS AF4775-2200633.pdf", "anio": 2026, "mes": 6, "equipoId": "e_mwcqn4oiyx8g3", "codigo": "4775/2200633", "nombre": "EQUIPO DE ORGANOS DE LOS SENTIDOS"}, {"pdf": "EQUIPO DE ORGANOS AFMC166007-0188-4311.pdf", "anio": 2026, "mes": 6, "equipoId": "e_mwcqn4oii7nwu", "codigo": "MC166007-0188/4311", "nombre": "EQUIPO DE ORGANOS DE LOS SENTIDOS"}, {"pdf": "EQUIPO DE ORGANOS AF4777-2200622.pdf", "anio": 2026, "mes": 6, "equipoId": "e_mwcqn4oi1z8bi", "codigo": "4777/2200622", "nombre": "EQUIPO DE ORGANOS DE LOS SENTIDOS"}, {"pdf": "LAMPARA CIELITICA AF2103915C.pdf", "anio": 2026, "mes": 6, "equipoId": "e_mwcqn4oirpkd1", "codigo": "2103915", "nombre": "LAMPARA CIELITICA"}, {"pdf": "MESA QUIRURGICA AF2104155.pdf", "anio": 2026, "mes": 6, "equipoId": "e_mwcqn4oih42wd", "codigo": "2100355", "nombre": "MESA QUIRURGICA"}, {"pdf": "LAMPARA CIELITICA AF2104383.pdf", "anio": 2026, "mes": 6, "equipoId": "e_mwcqn4ohjiqun", "codigo": "2104384", "nombre": "LAMPARA CIELITICA"}, {"pdf": "AUTOCLAVE DE PISO AF1100030.pdf", "anio": 2026, "mes": 6, "equipoId": "e_mwcqn4ohlb52c", "codigo": "110030", "nombre": "AUTOCLAVE VERTICAL"}, {"pdf": "BAÑO CALENTADOR DE LECHE HUMANA AF180133.pdf", "anio": 2026, "mes": 6, "equipoId": "e_mwcqn4oh58piz", "codigo": "1800133", "nombre": "BAÑO CALENTAMIENTO LECHE HUMANA"}, {"pdf": "GRAMERA AF180110.pdf", "anio": 2026, "mes": 6, "equipoId": "e_mwcqn4ohdg9kc", "codigo": "0180110", "nombre": "GRAMERA"}, {"pdf": "BASCULA DE PISO AFMC166008-0001.pdf", "anio": 2026, "mes": 6, "equipoId": "e_mwcqn4ojqmhll", "codigo": "MC166008-001", "nombre": "BASCULA DE PISO"}, {"pdf": "REGULADOR DE VACIO AFMP200820-4.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4ojpz2w6", "codigo": "MP20D820-4", "nombre": "REGULADOR DE VACIO"}, {"pdf": "REGULADOR DE VACIO AFMP49.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4oju3519", "codigo": "MP47", "nombre": "REGULADOR DE VACIO"}, {"pdf": "REGULADOR DE VACIO AF0675.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4ojz51p6", "codigo": "675", "nombre": "REGULADOR DE VACIO"}, {"pdf": "BICICLETA PORTATIL AFCOM231168.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4ojl84j5", "codigo": "COM0231168", "nombre": "BICICLETA PORTATIL"}, {"pdf": "REGULADOR DE VACIO AF220747.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4oj7l2dq", "codigo": "2200747", "nombre": "REGULADOR DE VACIO"}, {"pdf": "BICICLETA PORTATIL AFCOM231170.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4oj0yl99", "codigo": "COM0231170", "nombre": "BICICLETA PORTATIL"}, {"pdf": "REGULADOR DE VACIO AF0684.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4ojo88zp", "codigo": "684", "nombre": "REGULADOR DE VACIO"}, {"pdf": "BICICLETA PORTATIL AFCOM231169.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4ojei8xn", "codigo": "COM0231169", "nombre": "BICICLETA PORTATIL"}, {"pdf": "REGULADOR DE VACIO AF0682.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4ojfofa5", "codigo": "682", "nombre": "REGULADOR DE VACIO"}, {"pdf": "MICROPIPETA AF0180051.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4oiu9bqp", "codigo": "180051", "nombre": "MICROPIPETA"}, {"pdf": "MICROPIPETA AF0180052.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4oiy480s", "codigo": "180052", "nombre": "MICROPIPETA"}, {"pdf": "MICROPIPETA AF180087.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4ogpgrzu", "codigo": "180061", "nombre": "MICROSCOPIO"}, {"pdf": "MICROPIPETA AF0311.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4oiy90l1", "codigo": "311", "nombre": "MICROPIPETA"}, {"pdf": "CAMA ELECTRICA AF205592.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4oiamqfd", "codigo": "205590", "nombre": "CAMA ELECTRICA"}, {"pdf": "CAMA ELECTRICA AF205601.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4oi4db85", "codigo": "205602", "nombre": "CAMA ELECTRICA"}, {"pdf": "CAMA ELECTRICA AF205599.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4oi1a8yp", "codigo": "205589", "nombre": "CAMA ELECTRICA"}, {"pdf": "MICROPIPETA AF0391.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4ohk3c9i", "codigo": "391", "nombre": "MICROPIPETA"}, {"pdf": "REGULADOR DE VACIO AFMP110820-1.pdf", "anio": 2026, "mes": 5, "equipoId": "e_mwcqn4oj7v8my", "codigo": "MP110820-2", "nombre": "REGULADOR DE VACIO"}, {"pdf": "ASPIRADOR DE SECRECIONES AFMC16609010-0302-0205.pdf", "anio": 2026, "mes": 4, "equipoId": "e_mwcqn4ohthn3z", "codigo": "MC16609010-0302/0205", "nombre": "ASPIRADOR DE SECRECIONES"}, {"pdf": "TENSIOMETRO AF201130.pdf", "anio": 2026, "mes": 4, "equipoId": "e_mwcqn4oi2ahah", "codigo": "2201130", "nombre": "TENSIOMETRO DE PEDESTAL"}, {"pdf": "FLUJOMETRO AF02301441.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4oi7ov6k", "codigo": "2301441", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF02301438.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4oio19fp", "codigo": "2301438", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF0622.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4oihd1wc", "codigo": "622", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF02301436.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4oidahal", "codigo": "2301436", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF0341.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4ojkucyi", "codigo": "341", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF02301437.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4oilg9t9", "codigo": "2301437", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF02301439.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4oibqe4y", "codigo": "2301439", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF02301440.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4ohvmi4u", "codigo": "2301440", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF0342.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4ojies68", "codigo": "342", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF0808.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4oiuxxzv", "codigo": "808", "nombre": "FLUJOMETRO"}, {"pdf": "CAMA ELECTRICA AF2005544.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4ojw7xwf", "codigo": "2005574", "nombre": "CAMA ELECTRICA"}, {"pdf": "FLUJOMETRO AF0221713.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4oj2opb7", "codigo": "2201713", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF0221716.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4ojjy4ne", "codigo": "2201716", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AFUCIFLNo.05.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4ojdmbxm", "codigo": "UCI FL No.5", "nombre": "FLUJOMETRO"}, {"pdf": "FLUJOMETRO AF02000226.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4ojie4k9", "codigo": "2000226", "nombre": "FLUJOMETRO DOBLE"}, {"pdf": "FLUJOMETRO AFUCIFLNo.04.pdf", "anio": 2026, "mes": 3, "equipoId": "e_mwcqn4oj1u36q", "codigo": "UCI FL No.4", "nombre": "FLUJOMETRO"}, {"pdf": "TERMOHIGROMETRO AF5020-MC16609010-0304.pdf", "anio": 2026, "mes": 2, "equipoId": "e_mwcqn4oj85xvb", "codigo": "5020/MC16609010-0304", "nombre": "TERMOHIGROMETRO"}, {"pdf": "TERMOHIGROMETRO AF5011-MC16609010-301.pdf", "anio": 2026, "mes": 2, "equipoId": "e_mwcqn4oj0w3ou", "codigo": "5011/MC16609010-301", "nombre": "TERMOHIGROMETRO"}, {"pdf": "TERMOHIGROMETRO AFMC16609010-0272.pdf", "anio": 2026, "mes": 2, "equipoId": "e_mwcqn4oj6q6wn", "codigo": "MC16609010-0278", "nombre": "TERMOHIGROMETRO"}, {"pdf": "AGITADOR ROTATIVO AF0298.pdf", "anio": 2026, "mes": 2, "equipoId": "e_mwcqn4oiahmvg", "codigo": "298", "nombre": "AGITADOR ROTATIVO (MICROSCOPIA)"}, {"pdf": "AGITADOR ROTATIVO AF0295.pdf", "anio": 2026, "mes": 2, "equipoId": "e_mwcqn4oiozgku", "codigo": "295", "nombre": "AGITADOR ROTATIVO (ESTERILIZACION)"}, {"pdf": "TERMOMETRO DIGITAL AFMC166007-0129-4595.pdf", "anio": 2026, "mes": 2, "equipoId": "e_mwcqn4oi1lsjq", "codigo": "MC1660007-0129/4595", "nombre": "TERMOMETRO DIGITAL"}, {"pdf": "TERMOMETRO DIGITAL AFMC16609010-0667.pdf", "anio": 2026, "mes": 2, "equipoId": "e_mwcqn4ohtbh08", "codigo": "MC16609010-0647", "nombre": "TERMOHIGROMETRO"}, {"pdf": "LAMPARA AUXILIAR AF0359-2201389.pdf", "anio": 2026, "mes": 2, "equipoId": "e_mwcqn4oi41pn6", "codigo": "0359/2201389", "nombre": "LAMPARA AUXILIAR"}, {"pdf": "TERMOMETRO DIGITAL AFMC166007-209.pdf", "anio": 2026, "mes": 2, "equipoId": "e_mwcqn4oi1i05m", "codigo": "MC166007-0209", "nombre": "TERMOHIGROMETRO"}, {"pdf": "TERMOHIGROMETRO AFMC166007-0118.pdf", "anio": 2026, "mes": 2, "equipoId": "e_mwcqn4ohb1bsm", "codigo": "MC166007-0115", "nombre": "TERMOHIGROMETRO"}, {"pdf": "LAMPARA AUXILIAR AF0517.pdf", "anio": 2026, "mes": 2, "equipoId": "e_mwcqn4ohxs1j1", "codigo": "0547", "nombre": "LAMPARA DE CALOR RADIANTE"}, {"pdf": "TERMOHIGROMETRO AFMC166007-0390.pdf", "anio": 2026, "mes": 2, "equipoId": "e_mwcqn4oh3ywrf", "codigo": "MC166007-0391", "nombre": "TERMOHIGROMETRO"}, {"pdf": "TERMOHIGROMETRO AFMC16609010-0291-MC16609010-0147.pdf", "anio": 2026, "mes": 2, "equipoId": "e_mwcqn4oh5st1k", "codigo": "MC16609010-0291 / MC16609010-0147", "nombre": "TERMOHIGROMETRO"}, {"pdf": "REGULADOR DE YUGO AF2300746.pdf", "anio": 2026, "mes": 1, "equipoId": "e_mwcqn4oh66gal", "codigo": "2300736", "nombre": "REGULADOR DE YUGO"}];
+function renderCargaConfianza2026(){
+  const usr = usuarioActual();
+  if(!usr || usr.rol!=='administrador') return emptyState('alert','Sin permiso','Solo un Administrador puede usar esta herramienta.');
+  const est = cargaConfianza2026Estado;
+  const total = CASOS_CONFIANZA_2026_DATA.length;
+  return `
+  <div class="page-head"><h1>Carga de casos de confianza 2026</h1><p>Herramienta temporal: crea ${total} registro(s) de mantenimiento preventivo (estado "completado") a partir de informes reales encontrados en Google Drive cuyo código no coincidía exacto con el del equipo en el inventario. Solo incluye 2026, y solo los casos de un único equipo candidato sin ambigüedad de código.</p></div>
+  ${!est ? `
+    <div class="card card-pad">
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:14px;">Cada registro queda con una nota en la descripción citando el PDF de origen en Drive y aclarando que el día exacto del mes no está confirmado. <b>Este botón hay que presionarlo tú mismo, desde tu navegador</b> — es una escritura masiva a los datos compartidos del servidor. Es seguro presionarlo más de una vez (antes de crear cada registro, comprueba si ya existe uno para ese equipo y ese mes).</p>
+      <div class="btnrow"><button class="btn btn-primary" onclick="iniciarCargaConfianza2026()">${icon('upload',14)}Cargar casos de confianza 2026 (${total} registros)</button></div>
+    </div>`
+  : est==='corriendo' ? `<div class="card card-pad" style="text-align:center;color:var(--text-2);">${icon('clock',18)} Cargando…</div>`
+  : `
+    <div class="card card-pad">
+      <div class="section-title" style="margin-top:0;">Resultado</div>
+      <p style="font-size:13.5px;line-height:1.7;">
+        <b>${est.creados}</b> registro(s) de mantenimiento creado(s).<br/>
+        <b>${est.yaExistian}</b> ya existían (sin cambio).<br/>
+        <b>${est.sinEquipo}</b> sin equipo (el id ya no existe en el inventario actual).<br/>
+        ${est.error?`<b style="color:var(--critical);">Error:</b> ${esc(est.error)}`:'Guardado correctamente en el servidor.'}
+      </p>
+      ${est.sinEquipoLista && est.sinEquipoLista.length ? `<p style="font-size:12.5px;color:var(--text-2);">Pendientes sin equipo: <span class="mono">${est.sinEquipoLista.map(esc).join('; ')}</span></p>` : ''}
+      ${est.idsCreados && est.idsCreados.length ? `<p style="font-size:12.5px;color:var(--text-2);">IDs creados: <span class="mono">${est.idsCreados.join(', ')}</span></p>` : ''}
+      <div class="btnrow" style="margin-top:14px;"><button class="btn" onclick="cargaConfianza2026Estado=null; render();">${icon('refresh',14)}Volver</button></div>
+    </div>`}
+  `;
+}
+async function iniciarCargaConfianza2026(){
+  const usr = usuarioActual();
+  if(!usr || usr.rol!=='administrador'){ toast('Solo un Administrador puede usar esta herramienta'); return; }
+  cargaConfianza2026Estado = 'corriendo';
+  render();
+  const resultado = { creados:0, yaExistian:0, sinEquipo:0, idsCreados:[], sinEquipoLista:[], error:null };
+  try{
+    let intentos = 0, terminado = false;
+    while(intentos<5 && !terminado){
+      intentos++;
+      await loadInitialState();
+      let creados=0, yaExistian=0, sinEquipo=0;
+      const idsCreados = [];
+      const sinEquipoLista = [];
+      CASOS_CONFIANZA_2026_DATA.forEach(info=>{
+        const eq = state.equipos.find(e=>e.id===info.equipoId);
+        if(!eq){ sinEquipo++; sinEquipoLista.push(info.pdf+' ('+info.codigo+' '+info.nombre+')'); return; }
+        const mesStr = String(info.mes).padStart(2,'0');
+        const fecha = info.anio+'-'+mesStr+'-15';
+        const yaExiste = state.mantenimientos.some(m=> m.equipoId===eq.id && m.tipo==='preventivo' && m.estado==='completado' && m.fechaCompletado && m.fechaCompletado.slice(0,7)===(info.anio+'-'+mesStr));
+        if(yaExiste){ yaExistian++; return; }
+        const newId = uid('m');
+        const descripcionFinal = 'Mantenimiento preventivo según informe de contratista encontrado en Google Drive ("'+info.pdf+'"), detectado en auditoría de reportes vs. registros de la app (código del PDF no coincidía exacto con el del equipo en el inventario). Día exacto del mes no confirmado — se usó el día 15 por convención.';
+        state.mantenimientos.push({
+          id:newId, equipoId:eq.id, tipo:'preventivo', estado:'completado', prioridad:'media',
+          fechaSolicitud: fecha, fechaProgramada: fecha, fechaCompletado: fecha,
+          responsableId:null, solicitadoPor:'', descripcion: descripcionFinal, accionesRealizadas: '',
+          repuestos:'', costo:null, tiempoParoHoras:null
+        });
+        const eqFull = byId(state.equipos, eq.id);
+        if(eqFull) recalcularProximoPreventivoCompleto(state, eqFull);
+        idsCreados.push(newId);
+        creados++;
+      });
+      const r = await guardarEnServidor();
+      if(r.ok){
+        await persistLocalOnly();
+        resultado.creados = creados;
+        resultado.yaExistian = yaExistian;
+        resultado.sinEquipo = sinEquipo;
+        resultado.idsCreados = idsCreados;
+        resultado.sinEquipoLista = sinEquipoLista;
+        terminado = true;
+      } else if(r.code === 'conflict'){
+        continue;
+      } else {
+        resultado.error = 'No se pudo guardar en el servidor ('+(r.code||'error')+')';
+        terminado = true;
+      }
+    }
+    if(!terminado && !resultado.error) resultado.error = 'Conflicto de guardado persistente tras varios intentos; vuelve a intentarlo.';
+    await loadInitialState();
+    render();
+  }catch(e){
+    resultado.error = e.message||String(e);
+  }
+  cargaConfianza2026Estado = resultado;
+  render();
+  toast(resultado.error ? ('Ocurrió un problema: '+resultado.error) : `Carga terminada: ${resultado.creados} creado(s), ${resultado.yaExistian} ya existían, ${resultado.sinEquipo} sin equipo`);
+}
+/* ===== FIN BLOQUE TEMPORAL: Carga de casos de confianza 2026 ===== */
 init();
 </script>
 </body>
