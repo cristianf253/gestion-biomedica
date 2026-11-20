@@ -1136,6 +1136,21 @@ const META_TIEMPO_RESPUESTA_MIN = 30; // meta: tiempo de respuesta al llamado (c
 const META_CUMPLIMIENTO_PCT = 90; // meta: % de cumplimiento de mantenimiento preventivo y de calibración, superior al 90%
 const META_TIEMPO_PARADA_HORAS = 2; // meta: tiempo de parada del equipo (desde que inicia la intervención hasta que finaliza el servicio), menor a 2 horas
 const SERVICIOS_SUG = ['UCI Adultos','UCI Neonatal','Urgencias','Quirófano','Hospitalización','Consulta Externa','Imágenes Diagnósticas','Laboratorio','Neonatos','Central de Esterilización'];
+// Lista estandarizada de "servicios" realmente en uso: une los que estén registrados en
+// Configuración › Servicios, la pequeña lista de sugerencias (SERVICIOS_SUG) y, sobre todo, los
+// valores que YA aparecen tal cual en el inventario (eq.servicio / eq.servicioAnterior) — porque
+// en la práctica "servicio" es un campo de texto libre sin catálogo propio, y el catálogo real son
+// los nombres que el hospital ya viene usando. Se usa para ofrecer un <select> cerrado (en vez de
+// un campo de texto libre) al crear o editar un equipo, así una persona no puede crear sin darse
+// cuenta un servicio nuevo por un simple error de tipeo/acentos/mayúsculas — ver renderInvForm.
+function serviciosConocidos(){
+  return [...new Set([
+    ...state.servicios.map(s=>s.nombre),
+    ...SERVICIOS_SUG,
+    ...state.equipos.map(e=>e.servicio),
+    ...state.equipos.map(e=>e.servicioAnterior),
+  ])].filter(Boolean).sort((a,b)=>a.localeCompare(b,'es'));
+}
 const TIPOS_SUG = ['Monitor de signos vitales','Ventilador mecánico','Bomba de infusión','Desfibrilador','Electrobisturí','Incubadora neonatal','Ecógrafo','Autoclave','Equipo de rayos X','Camilla eléctrica','Aspirador de secreciones'];
 const MESES_LABEL = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
 const MESES_LABEL_LARGO = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
@@ -4899,6 +4914,31 @@ async function handleCargaHojaVida(ev){
 // quedó pendiente de confirmación (todas las casillas coincidentes ya tenían un valor), para poder
 // aplicarlos con forzar=true si el usuario confirma que quiere reemplazarlos (ver handleCargaHojaVida
 // y confirmarSobrescribirHojaVida).
+// Campo "servicio" estandarizado: un <select> con los servicios ya conocidos (ver
+// serviciosConocidos()) en vez de un campo de texto libre, para que no se pueda crear sin darse
+// cuenta un servicio nuevo por un error de tipeo. Incluye siempre una opción "+ Agregar un
+// servicio nuevo…" al final que revela un campo de texto aparte (ver submitInvForm) para los casos
+// legítimos en los que sí hace falta un servicio que todavía no existe en el sistema. Si el equipo
+// que se está editando ya tenía guardado un valor que NO está en la lista conocida (datos antiguos,
+// de antes de esta estandarización), se agrega igual como una opción propia para no perderlo ni
+// obligar a cambiarlo sin querer.
+function renderCampoServicioEstandarizado({ name, nuevoName, campoId, label, hint, required, valorActual }){
+  const conocidos = serviciosConocidos();
+  const valorEsConocido = !valorActual || conocidos.includes(valorActual);
+  return `
+  <div class="field"><label>${esc(label)}${hint?` <span class="hint">${esc(hint)}</span>`:''}</label>
+    <select name="${esc(name)}" ${required?'required':''} onchange="document.getElementById('${esc(campoId)}').style.display = this.value==='__nuevo__' ? '' : 'none';">
+      <option value="" ${!valorActual?'selected':''}>${required?'— Selecciona un servicio —':'— Ninguno —'}</option>
+      ${!valorEsConocido ? `<option value="${esc(valorActual)}" selected>${esc(valorActual)}</option>` : ''}
+      ${conocidos.map(s=>`<option value="${esc(s)}" ${valorActual===s?'selected':''}>${esc(s)}</option>`).join('')}
+      <option value="__nuevo__">+ Agregar un servicio nuevo…</option>
+    </select>
+  </div>
+  <div class="field" id="${esc(campoId)}" style="display:none;">
+    <label>Nombre del servicio nuevo</label>
+    <input name="${esc(nuevoName)}" placeholder="Escribe el nombre exacto del nuevo servicio"/>
+  </div>`;
+}
 let ultimaCargaHojaVida = null;
 function confirmarSobrescribirHojaVida(){
   if(!ultimaCargaHojaVida) return;
@@ -4946,8 +4986,8 @@ function renderInvForm(id){
 
     <div class="section-title">Ubicación y responsable</div>
     <div class="formgrid">
-      <div class="field"><label>Servicio anterior <span class="hint">(si aplica)</span></label><input name="servicioAnterior" list="serv-sug" value="${esc(eq?.servicioAnterior||'')}" placeholder="Ej. Urgencias"/></div>
-      <div class="field"><label>Servicio actual</label><input name="servicio" list="serv-sug" required value="${esc(eq?.servicio||'')}" placeholder="Ej. UCI Adultos"/></div>
+      ${renderCampoServicioEstandarizado({ name:'servicioAnterior', nuevoName:'servicioAnteriorNuevo', campoId:'campo-servicio-anterior-nuevo', label:'Servicio anterior', hint:'(si aplica)', required:false, valorActual:eq?.servicioAnterior||'' })}
+      ${renderCampoServicioEstandarizado({ name:'servicio', nuevoName:'servicioNuevo', campoId:'campo-servicio-nuevo', label:'Servicio actual', required:true, valorActual:eq?.servicio||'' })}
       <div class="field"><label>Ubicación específica</label><input name="ubicacion" value="${esc(eq?.ubicacion||'')}" placeholder="Ej. Piso 3, cama 5"/></div>
       <div class="field"><label>Responsable</label><select name="responsableId"><option value="">— Sin asignar —</option>${responsableOptions(eq?.responsableId)}</select></div>
       <div class="field"><label>Estado</label><select name="estado" onchange="document.getElementById('campo-motivo-fs').style.display = this.value==='fuera_servicio' ? '' : 'none';">${Object.entries(ESTADOS_EQUIPO).map(([k,v])=>`<option value="${k}" ${eq?.estado===k?'selected':''}>${v.label}</option>`).join('')}</select></div>
@@ -5061,7 +5101,6 @@ function renderInvForm(id){
     <datalist id="prov-telefono-sug">${sugerenciasProveedorCampo('telefono').map(s=>`<option value="${esc(s)}">`).join('')}</datalist>
     <datalist id="prov-ciudad-sug">${sugerenciasProveedorCampo('ciudad').map(s=>`<option value="${esc(s)}">`).join('')}</datalist>
     <datalist id="prov-email-sug">${sugerenciasProveedorCampo('email').map(s=>`<option value="${esc(s)}">`).join('')}</datalist>
-    <datalist id="serv-sug">${[...new Set([...state.servicios.map(s=>s.nombre), ...SERVICIOS_SUG])].filter(Boolean).map(s=>`<option value="${esc(s)}">`).join('')}</datalist>
     <datalist id="clasif-sug">${sugerenciasEquipoCampo('clasificacionBiomedica', CLASIF_BIOMEDICA_SUG).map(s=>`<option value="${esc(s)}">`).join('')}</datalist>
     <datalist id="tecno-sug">${sugerenciasEquipoCampo('tecnologiaPredominante', TECNOLOGIA_SUG).map(s=>`<option value="${esc(s)}">`).join('')}</datalist>
     <datalist id="forma-adq-sug">${FORMA_ADQ_SUG.map(s=>`<option value="${esc(s)}">`).join('')}</datalist>
@@ -5108,11 +5147,17 @@ function submitInvForm(ev, id){
     if(!eqExistente || !puedeEditarEquipoInventario(eqExistente)){ toast('Solo puedes editar equipos de los servicios que tienes asignados'); return false; }
   }
   const f = ev.target;
+  // El <select> estandarizado de servicio usa '__nuevo__' como valor-señal de "quiero escribir uno
+  // nuevo" (ver renderCampoServicioEstandarizado) — en ese caso el nombre real viene en el campo de
+  // texto que se revela al lado, no en el propio <select>.
+  const servicioVal = f.servicio.value==='__nuevo__' ? (f.servicioNuevo?f.servicioNuevo.value:'').trim() : f.servicio.value.trim();
+  const servicioAnteriorVal = f.servicioAnterior.value==='__nuevo__' ? (f.servicioAnteriorNuevo?f.servicioAnteriorNuevo.value:'').trim() : f.servicioAnterior.value.trim();
+  if(!servicioVal){ toast('Selecciona el servicio actual, o escribe el nombre del servicio nuevo'); return false; }
   const data = {
     nombre: f.nombre.value.trim(), tipo: f.nombre.value.trim(), codigo: f.codigo.value.trim(),
     marca: f.marca.value.trim(), modelo: f.modelo.value.trim(), serie: f.serie.value.trim(),
     riesgo: f.riesgo.value,
-    servicioAnterior: f.servicioAnterior.value.trim(), servicio: f.servicio.value.trim(), ubicacion: f.ubicacion.value.trim(),
+    servicioAnterior: servicioAnteriorVal, servicio: servicioVal, ubicacion: f.ubicacion.value.trim(),
     estado: f.estado.value, motivoFueraServicio: f.motivoFueraServicio.value.trim(),
     responsableId: f.responsableId.value || null,
     registroSanitario: f.registroSanitario.value.trim(),
@@ -7448,7 +7493,7 @@ function renderRespForm(id){
   const mostrarContrato = r && ROLES_CON_CONTRATO.includes(r.rol);
   const mostrarServicio = r && ROLES_CON_SERVICIO.includes(r.rol);
   const mostrarContratosSup = r && ROLES_CON_SUPERVISION_CONTRATOS.includes(r.rol);
-  const serviciosOpciones = [...new Set([...state.servicios.map(s=>s.nombre), ...SERVICIOS_SUG, ...state.equipos.map(e=>e.servicio)])].filter(Boolean).sort();
+  const serviciosOpciones = serviciosConocidos();
   const contratosSupervisadosDe = contratosSupervisadosDeResponsable(r);
   return `
   <div class="page-head"><h1>${editing?'Editar responsable':'Agregar responsable'}</h1><p>Perfil de usuario del personal biomédico: información de contacto y rol asignado dentro del sistema.</p></div>
