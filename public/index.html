@@ -5909,6 +5909,7 @@ function renderMantDetalle(id){
   ${(isDone && m.protocoloCargadoManual && eq && puedeCargarProtocoloVencido()) ? renderReemplazarProtocoloVencido(m, eq) : ''}
   ${renderFirmasPreventivo(m, eq)}
   ${m.tipo==='preventivo' && puedeEditarFechasMantenimiento() ? renderEditarFechasPreventivo(m) : ''}
+  ${m.tipo==='preventivo' && !puedeEditarFechasMantenimiento() && puedeDesprogramarPreventivo(m) ? renderDesprogramarPreventivo(m) : ''}
   ${puedeReasignarCorrectivo(m) ? renderReasignarCorrectivo(m, eq) : ''}
 
   <div class="btnrow" style="margin-top:16px;">
@@ -6356,6 +6357,20 @@ function renderEditarFechasPreventivo(m){
     ${puedeDesprog ? `<p style="font-size:11.5px;color:var(--text-3);margin-top:${m.edicionFechas?'4':'10'}px;">"Desprogramar" elimina este preventivo del cronograma por completo (a diferencia de "Cancelar" en la sección de arriba, no deja un registro histórico) y recalcula automáticamente la próxima fecha de mantenimiento del equipo.</p>` : ''}
   </form>`;
 }
+// Botón de "Desprogramar" para quien puede desprogramar este preventivo (ver
+// puedeDesprogramarPreventivo: Administrador, o Biomédico Administrativo dentro de sus servicios
+// asignados / con permiso puntual aprobado) pero NO tiene acceso al panel de "Editar fechas"
+// (ese panel sigue exclusivo de Administrador — ver renderEditarFechasPreventivo). Se muestra solo
+// cuando el panel de arriba no aplica, para no duplicar el botón.
+function renderDesprogramarPreventivo(m){
+  return `
+  <div class="card card-pad" style="margin-top:14px;">
+    <div class="btnrow">
+      <button type="button" class="btn btn-danger" onclick="desprogramarPreventivo('${m.id}')">${icon('x',14)}Desprogramar</button>
+    </div>
+    <p style="font-size:11.5px;color:var(--text-3);margin-top:10px;">"Desprogramar" elimina este preventivo del cronograma por completo (a diferencia de "Cancelar" en la sección de arriba, no deja un registro histórico) y recalcula automáticamente la próxima fecha de mantenimiento del equipo.</p>
+  </div>`;
+}
 // Recalcula eq.fechaUltimoPreventivo/eq.fechaProximoPreventivo a partir de TODOS los preventivos
 // completados del equipo (se toma el de fecha de finalización más reciente), en vez de asumir que
 // el que se acaba de editar sigue siendo el más reciente — necesario porque un Administrador puede
@@ -6368,13 +6383,26 @@ function recalcularProximoPreventivo(s, eq){
   eq.fechaProximoPreventivo = eq.frecuenciaPreventivaMeses ? addMonths(masReciente.fechaCompletado, eq.frecuenciaPreventivaMeses) : null;
 }
 // ¿Puede el usuario con sesión iniciada desprogramar (quitar del cronograma) este preventivo?
-// Exclusivo de Administrador (ver puedeEditarFechasMantenimiento), y solo mientras siga pendiente
-// o en curso — uno ya completado o cancelado no se "desprograma", se corrige con Editar fechas o
-// ya quedó registrado como cancelado. A diferencia de "Cancelar" (disponible para cualquier rol
-// con edición en Mantenimiento y que sí deja un registro histórico marcado como cancelado), esto
-// borra el mantenimiento por completo, como si nunca se hubiera programado.
+// Disponible para Administrador (sin restricción de servicio) y también para Biomédico
+// Administrativo, pero este último solo sobre equipos de su(s) servicio(s) asignado(s) — o de un
+// equipo para el que tenga un permiso puntual aprobado, ver tienePermisoTemporalVigente — igual
+// que el resto de ediciones de hoja de vida de ese rol. Esta función es independiente de
+// puedeEditarFechasMantenimiento(), que sigue exclusiva de Administrador y solo rige el panel de
+// reasignar fechas manualmente (otra función distinta). Solo mientras el preventivo siga pendiente
+// o en curso — uno ya completado o cancelado no se "desprograma", se corrige con Editar fechas o ya
+// quedó registrado como cancelado. A diferencia de "Cancelar" (disponible para cualquier rol con
+// edición en Mantenimiento y que sí deja un registro histórico marcado como cancelado), esto borra
+// el mantenimiento por completo, como si nunca se hubiera programado.
 function puedeDesprogramarPreventivo(m){
-  return !!(m && m.tipo==='preventivo' && (m.estado==='pendiente'||m.estado==='en_proceso') && puedeEditarFechasMantenimiento());
+  if(!m || m.tipo!=='preventivo' || (m.estado!=='pendiente' && m.estado!=='en_proceso')) return false;
+  const usr = usuarioActual();
+  if(!usr) return false;
+  if(usr.rol==='administrador') return true;
+  if(usr.rol==='biomedico_administrativo'){
+    const eq = byId(state.equipos, m.equipoId);
+    return !!(eq && (responsableTieneServicio(usr, eq.servicio) || tienePermisoTemporalVigente(usr, eq)));
+  }
+  return false;
 }
 // Recalcula eq.fechaProximoPreventivo desde cero tras eliminar/desprogramar un preventivo pendiente,
 // cuando no es evidente cuál debería ser la próxima fecha porque ya no existe el registro que la
@@ -6393,9 +6421,8 @@ function recalcularProximoPreventivoCompleto(s, eq){
   eq.fechaProximoPreventivo = (base && eq.frecuenciaPreventivaMeses) ? addMonths(base, eq.frecuenciaPreventivaMeses) : null;
 }
 function desprogramarPreventivo(id){
-  if(!puedeEditarFechasMantenimiento()){ toast('Solo un Administrador puede desprogramar este mantenimiento'); return; }
   const m = byId(state.mantenimientos, id);
-  if(!puedeDesprogramarPreventivo(m)) return;
+  if(!puedeDesprogramarPreventivo(m)){ toast('No tienes permiso para desprogramar este mantenimiento'); return; }
   openConfirm(
     'Desprogramar preventivo',
     'A diferencia de "Cancelar", esta acción elimina por completo el mantenimiento del cronograma (no queda un registro histórico) y recalcula automáticamente la próxima fecha de mantenimiento del equipo. ¿Confirmas que quieres desprogramarlo?',
