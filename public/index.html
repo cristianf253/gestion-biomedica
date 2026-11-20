@@ -6076,6 +6076,7 @@ function renderMantDetalle(id){
   ${renderFirmasPreventivo(m, eq)}
   ${m.tipo==='preventivo' && puedeEditarFechasMantenimiento() ? renderEditarFechasPreventivo(m) : ''}
   ${m.tipo==='preventivo' && !puedeEditarFechasMantenimiento() && puedeDesprogramarPreventivo(m) ? renderDesprogramarPreventivo(m) : ''}
+  ${puedeEliminarMantenimientoCompletado(m) ? renderEliminarMantenimientoCompletado(m) : ''}
   ${puedeReasignarCorrectivo(m) ? renderReasignarCorrectivo(m, eq) : ''}
 
   <div class="btnrow" style="margin-top:16px;">
@@ -6548,6 +6549,18 @@ function renderDesprogramarPreventivo(m){
     <p style="font-size:11.5px;color:var(--text-3);margin-top:10px;">"Desprogramar" elimina este preventivo del cronograma por completo (a diferencia de "Cancelar" en la sección de arriba, no deja un registro histórico) y recalcula automáticamente la próxima fecha de mantenimiento del equipo.</p>
   </div>`;
 }
+// Panel para eliminar por completo un mantenimiento ya completado (en verde) — ver
+// puedeEliminarMantenimientoCompletado() y eliminarMantenimientoCompletado() para quién y cuándo
+// aplica. Exclusivo de Administrador, igual que "Eliminar registro" para uno cancelado.
+function renderEliminarMantenimientoCompletado(m){
+  return `
+  <div class="card card-pad" style="margin-top:14px;">
+    <div class="btnrow">
+      <button type="button" class="btn btn-danger" onclick="eliminarMantenimientoCompletado('${m.id}')">${icon('trash',14)}Eliminar este mantenimiento</button>
+    </div>
+    <p style="font-size:11.5px;color:var(--text-3);margin-top:10px;">Borra por completo este mantenimiento ya marcado como cumplido (como si nunca se hubiera realizado) y recalcula automáticamente la próxima fecha de mantenimiento del equipo. Úsalo solo para corregir un registro equivocado o una prueba.</p>
+  </div>`;
+}
 // Recalcula eq.fechaUltimoPreventivo/eq.fechaProximoPreventivo a partir de TODOS los preventivos
 // completados del equipo (se toma el de fecha de finalización más reciente), en vez de asumir que
 // el que se acaba de editar sigue siendo el más reciente — necesario porque un Administrador puede
@@ -6604,6 +6617,41 @@ function eliminarMantenimientoCancelado(id){
         s.mantenimientos = s.mantenimientos.filter(x=>x.id!==id);
         if(eq && mm.tipo==='preventivo') recalcularProximoPreventivoCompleto(s, eq);
       }, 'Registro cancelado eliminado');
+      goBack();
+    },
+    { danger:true, confirmLabel:'Sí, eliminar' }
+  );
+}
+// ¿Puede el usuario con sesión iniciada eliminar por completo un mantenimiento ya completado (en
+// verde en el Inventario y el Cronograma)? Pensado para corregir un mantenimiento marcado como
+// cumplido por error (equipo o fecha equivocada, una prueba) — no como parte del flujo normal, por
+// eso se reserva exclusivamente a Administrador, mismo criterio que puedeEliminarMantenimientoCancelado
+// y puedeEditarFechasMantenimiento ("corrección administrativa excepcional"). Aplica a cualquier
+// tipo de mantenimiento (preventivo o correctivo), ya que ambos pueden quedar marcados como cumplidos.
+function puedeEliminarMantenimientoCompletado(m){
+  return !!(m && m.estado==='completado' && puedeEditarFechasMantenimiento());
+}
+function eliminarMantenimientoCompletado(id){
+  const m = byId(state.mantenimientos, id);
+  if(!puedeEliminarMantenimientoCompletado(m)){ toast('No tienes permiso para eliminar este registro'); return; }
+  openConfirm(
+    'Eliminar mantenimiento completado',
+    'Esto borra por completo este mantenimiento del historial, como si nunca se hubiera realizado (no queda ningún rastro). El checklist, las firmas o el protocolo cargado que tuviera también se descartan. Úsalo solo para corregir un registro marcado como cumplido por error o una prueba, no como parte del flujo normal. Se recalculará automáticamente la próxima fecha de mantenimiento del equipo. ¿Confirmas que quieres eliminarlo?',
+    ()=>{
+      let checklistDocId = null, protocoloDocId = null;
+      commit(s=>{
+        const mm = byId(s.mantenimientos, id);
+        if(!mm) return;
+        const eq = byId(s.equipos, mm.equipoId);
+        checklistDocId = mm.checklistPdfDocId || null;
+        protocoloDocId = mm.protocoloVencidoDocId || null;
+        if(eq){
+          eq.documentos = (eq.documentos||[]).filter(d=>d.id!==checklistDocId && d.id!==protocoloDocId);
+        }
+        s.mantenimientos = s.mantenimientos.filter(x=>x.id!==id);
+        if(eq && mm.tipo==='preventivo') recalcularProximoPreventivoCompleto(s, eq);
+      }, 'Mantenimiento completado eliminado');
+      if(protocoloDocId) borrarContenidoDocumento(protocoloDocId); // contenido pesado guardado aparte (ver submitProtocoloVencido)
       goBack();
     },
     { danger:true, confirmLabel:'Sí, eliminar' }
