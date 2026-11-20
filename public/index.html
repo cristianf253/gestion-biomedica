@@ -3437,6 +3437,7 @@ function renderScreen(scr){
       case 'config-protocolo-add': return renderProtocoloForm(null);
       case 'config-protocolo-edit': return renderProtocoloForm(scr.params.id);
       case 'config-recuperar-docs': return renderRecuperarDocumentos();
+      case 'config-completar-recomendaciones': return renderCompletarRecomendaciones();
       case 'config-carga-confianza-2026': return renderCargaConfianza2026();
       default: return renderHome();
     }
@@ -3840,8 +3841,14 @@ function buscarPlantillaTecnicaPorMarcaModelo(marca, modelo, excluirId){
 // encuentra ninguno, como última alternativa ofrece los datos generales del fabricante si la marca se
 // reconoce en el catálogo (ver CATALOGO_FABRICANTES_CONOCIDOS), marcados como sugerencia sin
 // verificar mediante `sugerido:true`.
+// Texto general de "Recomendaciones" (uso, limpieza y almacenamiento) válido para la gran mayoría de
+// equipos biomédicos, usado como último recurso cuando un equipo no tiene esa casilla diligenciada y
+// tampoco hay un equipo propio del mismo modelo del que copiarla (ver calcularAutocompletadoTecnico /
+// iniciarCompletarRecomendaciones). Siempre se puede editar después desde la hoja de vida del equipo
+// para un texto más específico; esto solo evita dejar la casilla en blanco.
+const RECOMENDACIONES_GENERICAS_DEFECTO = 'Usar el equipo únicamente por personal capacitado, siguiendo las instrucciones del manual del fabricante. Verificar su buen estado y funcionamiento antes de cada uso; si se detecta alguna falla o comportamiento anormal, suspender su uso de inmediato y reportarlo a Mantenimiento Biomédico, sin intentar repararlo ni manipular sus componentes internos. Limpiar y desinfectar después de cada uso con los productos autorizados por la institución, evitando el ingreso de líquidos a las partes eléctricas o electrónicas, y dejarlo secar bien antes de guardarlo. Almacenar en un lugar limpio, seco, ventilado y protegido de golpes, polvo, luz solar directa y temperaturas extremas. Conectarlo solo a tomas eléctricas en buen estado, con conexión a tierra y sin sobrecargar el circuito. Respetar el cronograma de mantenimiento preventivo y de calibración programado para este equipo.';
 function calcularAutocompletadoTecnico(marca, modelo, existing){
-  const resultado = { campos:{}, sugerido:false };
+  const resultado = { campos:{}, sugerido:false, recomendacionesGenericas:false };
   const plantilla = buscarPlantillaTecnicaPorMarcaModelo(marca, modelo, existing ? existing.id : null);
   if(plantilla){
     CAMPOS_REGISTRO_TECNICO.forEach(c=>{
@@ -3853,15 +3860,20 @@ function calcularAutocompletadoTecnico(marca, modelo, existing){
     if(plantilla.fabricante && plantilla.fabricante.nombre && !(existing && existing.fabricante && existing.fabricante.nombre)){
       resultado.campos.fabricante = { ...plantilla.fabricante };
     }
-    return resultado;
-  }
-  if(!(existing && existing.fabricante && existing.fabricante.nombre)){
+  } else if(!(existing && existing.fabricante && existing.fabricante.nombre)){
     const fab = buscarFabricanteConocido(marca);
     if(fab){
       resultado.campos.fabricante = { nombre: fab.nombre, ciudad: fab.ciudad, direccion:'', telefono:'', email:'' };
       if(!(existing && existing.registroInvima)) resultado.campos.registroInvima = 'si';
       resultado.sugerido = true;
     }
+  }
+  // Recomendaciones: si no hubo una específica que copiar de un equipo hermano del mismo modelo, ni
+  // el equipo ya tenía una propia, se usa como última alternativa el texto general de arriba — así
+  // ningún equipo queda con esta casilla en blanco.
+  if(!(existing && existing.recomendaciones) && !resultado.campos.recomendaciones){
+    resultado.campos.recomendaciones = RECOMENDACIONES_GENERICAS_DEFECTO;
+    resultado.recomendacionesGenericas = true;
   }
   return resultado;
 }
@@ -4050,7 +4062,6 @@ function procesarFilaImport(raw, idx){
     });
     if(autofill.campos.registroInvima !== undefined && !data.registroInvima){ data.registroInvima = autofill.campos.registroInvima; camposAplicados.push('registroInvima'); }
     if(autofill.campos.registroSanitario !== undefined && !data.registroSanitario){ data.registroSanitario = autofill.campos.registroSanitario; camposAplicados.push('registroSanitario'); }
-    if(autofill.campos.recomendaciones !== undefined && !data.recomendaciones){ data.recomendaciones = autofill.campos.recomendaciones; camposAplicados.push('recomendaciones'); }
     if(autofill.campos.fabricante !== undefined){ data.fabricante = autofill.campos.fabricante; camposAplicados.push('fabricante'); }
     if(camposAplicados.length){
       if(autofill.sugerido){
@@ -4059,6 +4070,15 @@ function procesarFilaImport(raw, idx){
       } else {
         issues.push(`Se completaron datos técnicos/INVIMA/fabricante copiándolos de un equipo propio ya registrado del mismo modelo (${data.marca} ${data.modelo})`);
       }
+    }
+    // Las recomendaciones van aparte: no cuentan como "sugerencia sin verificar" ni como "copiadas de
+    // un equipo propio" cuando son el texto general por defecto — son solo un punto de partida
+    // editable, no un dato técnico específico que pueda estar mal.
+    if(autofill.campos.recomendaciones !== undefined && !data.recomendaciones){
+      data.recomendaciones = autofill.campos.recomendaciones;
+      issues.push(autofill.recomendacionesGenericas
+        ? 'Se completó "Recomendaciones" con un texto general de uso, limpieza y almacenamiento (puedes editarlo en la hoja de vida)'
+        : `Se completó "Recomendaciones" copiándola de un equipo propio ya registrado del mismo modelo (${data.marca} ${data.modelo})`);
     }
   }
 
@@ -5140,7 +5160,10 @@ function submitInvForm(ev, id){
     const usoPermisoTemporal = !!(usrForm && usrForm.rol==='biomedico_administrativo' && !responsableTieneServicio(usrForm, eqExistente.servicio));
     // Se compara ANTES de guardar, contra los valores que tenía el equipo hasta ahora, para saber si
     // de verdad se modificó algo del Registro técnico (ver ofrecerPropagarRegistroTecnico más abajo).
+    // Esto se calcula ANTES del autocompletado silencioso de "Recomendaciones" de la línea siguiente,
+    // para no disparar esa pregunta solo porque esta casilla se completó sola al quedar vacía.
     const camposCambiados = camposRegistroTecnicoModificados(eqExistente, data);
+    if(!data.recomendaciones){ data.recomendaciones = calcularAutocompletadoTecnico(data.marca, data.modelo, eqExistente).campos.recomendaciones || ''; }
     commit(s=>{
       const eq = byId(s.equipos, id);
       Object.assign(eq, data);
@@ -5160,6 +5183,7 @@ function submitInvForm(ev, id){
     go('inv-detail',{id},'Detalle');
     ofrecerPropagarRegistroTecnico(id, camposCambiados);
   } else {
+    if(!data.recomendaciones){ data.recomendaciones = calcularAutocompletadoTecnico(data.marca, data.modelo, null).campos.recomendaciones || ''; }
     const newId = uid('e');
     commit(s=>{ s.equipos.push({ id:newId, ...data }); }, 'Equipo agregado al inventario ✓');
     go('inv-detail',{id:newId},'Detalle');
@@ -7568,10 +7592,96 @@ function renderConfigMenu(){
     ${tileButton({icon:'download', title:'Exportar datos', desc:'Descarga una copia de todo el inventario y mantenimientos en formato JSON.', onclick:"exportarDatos()"})}
     ${tileButton({icon:'box', title:'Cargar datos de ejemplo', desc:'Restablece la aplicación con un conjunto de datos de demostración.', onclick:"askCargarEjemplo()"})}
     ${tileButton({icon:'upload', title:'Recuperar documentos', desc:'Sube al servidor los documentos adjuntos que solo quedaron guardados en este navegador (por eso no se ven desde otros equipos).', onclick:"go('config-recuperar-docs',{},'Recuperar documentos')"})}
+    ${usr && usr.rol==='administrador' ? tileButton({icon:'clipboard', title:'Completar Recomendaciones', desc:'Completa la casilla "Recomendaciones" de los equipos que no la tienen, copiándola de un equipo propio del mismo modelo o usando un texto general si no hay ninguno.', onclick:"go('config-completar-recomendaciones',{},'Completar Recomendaciones')"}) : ''}
     ${usr && usr.rol==='administrador' ? tileButton({icon:'upload', title:'Carga de casos de confianza 2026', desc:'Herramienta temporal: crea los 89 mantenimientos preventivos de 2026 confirmados en la auditoría de reportes de Drive. Bórrala cuando termines de usarla.', onclick:"go('config-carga-confianza-2026',{},'Carga de casos de confianza 2026')"}) : ''}
     ${puedeRealizarAccion('vaciarDatos') ? tileButton({icon:'trash', title:'Vaciar todos los datos', desc:'Elimina equipos, mantenimientos, alertas, responsables y contratos.', onclick:"askVaciarDatos()"}) : ''}
   </div>`;
 }
+// ---- Completar Recomendaciones: ver completarRecomendacionesEstado/renderCompletarRecomendaciones/
+// iniciarCompletarRecomendaciones más abajo. Reutiliza calcularAutocompletadoTecnico (la misma lógica
+// que ya aplica esto al importar por Excel) para completar, de una vez, los equipos que YA existían
+// antes de que esa casilla se empezara a autocompletar — copia la recomendación de un equipo propio
+// del mismo tipo+marca+modelo si existe alguna diligenciada, y si no, usa el texto general por
+// defecto (ver RECOMENDACIONES_GENERICAS_DEFECTO). Nunca reemplaza una recomendación que un equipo ya
+// tenga, y es seguro correrlo más de una vez (los que ya quedaron con algo no se vuelven a tocar). ----
+let completarRecomendacionesEstado = null; // null=sin iniciar; 'corriendo'; o resultado
+function renderCompletarRecomendaciones(){
+  const usr = usuarioActual();
+  if(!usr || usr.rol!=='administrador') return emptyState('alert','Sin permiso','Solo un Administrador puede usar esta herramienta.');
+  const est = completarRecomendacionesEstado;
+  const faltantes = state.equipos.filter(e=>!e.recomendaciones).length;
+  return `
+  <div class="page-head"><h1>Completar Recomendaciones</h1><p>Completa la casilla "Recomendaciones" (uso, limpieza y almacenamiento) de los equipos que todavía no la tienen: copia la de un equipo propio del mismo tipo, marca y modelo si ya existe diligenciada, y si no hay ninguna, usa un texto general válido para la mayoría de equipos biomédicos. Nunca reemplaza una recomendación que un equipo ya tenga — siempre se puede editar después desde la hoja de vida de cada equipo.</p></div>
+  <div class="card card-pad" style="margin-bottom:16px;">
+    <p style="font-size:13.3px;color:var(--text-2);">Actualmente <b>${faltantes}</b> de ${state.equipos.length} equipo(s) no tienen "Recomendaciones" diligenciadas.</p>
+  </div>
+  ${!est ? `
+  <div class="btnrow"><button class="btn btn-primary" onclick="iniciarCompletarRecomendaciones()" ${faltantes===0?'disabled':''}>${icon('clipboard',15)}Completar recomendaciones faltantes</button></div>
+  ` : est==='corriendo' ? `
+  <div class="card card-pad" style="text-align:center;color:var(--text-2);">${icon('clock',18)} Completando…</div>
+  ` : `
+  <div class="card card-pad">
+    <div class="section-title" style="margin-top:0;">Resultado</div>
+    <p style="font-size:13.5px;line-height:1.8;">
+      Equipos revisados: <b>${est.revisados}</b><br/>
+      Completados copiando la de un equipo propio del mismo modelo: <b>${est.copiadosDeHermano}</b><br/>
+      Completados con el texto general por defecto: <b>${est.genericos}</b><br/>
+      Ya tenían recomendaciones (sin cambio): <b>${est.yaTenian}</b>
+      ${est.error?`<br/><b style="color:var(--critical);">Error:</b> ${esc(est.error)}`:''}
+    </p>
+    <div class="btnrow" style="margin-top:14px;"><button class="btn" onclick="completarRecomendacionesEstado=null; render();">${icon('refresh',14)}Volver</button></div>
+  </div>`}
+  `;
+}
+async function iniciarCompletarRecomendaciones(){
+  const usr = usuarioActual();
+  if(!usr || usr.rol!=='administrador'){ toast('Solo un Administrador puede usar esta herramienta'); return; }
+  completarRecomendacionesEstado = 'corriendo';
+  render();
+  const resultado = { revisados:0, copiadosDeHermano:0, genericos:0, yaTenian:0, error:null };
+  try{
+    let intentos = 0, terminado = false;
+    while(intentos<5 && !terminado){
+      intentos++;
+      await loadInitialState();
+      // Primero se calcula QUÉ le toca a cada equipo sin recomendaciones, todo contra el mismo estado
+      // sin tocar nada todavía — así un equipo que recibe el texto genérico en esta misma corrida no
+      // se lo "presta" después a otro como si fuera una recomendación propia de un equipo hermano.
+      const pendientes = state.equipos.filter(eq=>!eq.recomendaciones);
+      const planes = pendientes.map(eq=>({ eq, auto: calcularAutocompletadoTecnico(eq.marca, eq.modelo, eq) }));
+      let copiadosDeHermano=0, genericos=0;
+      planes.forEach(({eq, auto})=>{
+        if(auto.campos.recomendaciones){
+          eq.recomendaciones = auto.campos.recomendaciones;
+          if(auto.recomendacionesGenericas) genericos++; else copiadosDeHermano++;
+        }
+      });
+      const r = await guardarEnServidor();
+      if(r.ok){
+        await persistLocalOnly();
+        resultado.revisados = state.equipos.length;
+        resultado.copiadosDeHermano = copiadosDeHermano;
+        resultado.genericos = genericos;
+        resultado.yaTenian = state.equipos.length - pendientes.length;
+        terminado = true;
+      } else if(r.code === 'conflict'){
+        continue;
+      } else {
+        resultado.error = 'No se pudo guardar en el servidor ('+(r.code||'error')+')';
+        terminado = true;
+      }
+    }
+    if(!terminado && !resultado.error) resultado.error = 'Conflicto de guardado persistente tras varios intentos; vuelve a intentarlo.';
+    await loadInitialState();
+    render();
+  }catch(e){
+    resultado.error = e.message||String(e);
+  }
+  completarRecomendacionesEstado = resultado;
+  render();
+  toast(resultado.error ? ('Ocurrió un problema: '+resultado.error) : `Recomendaciones completadas en ${resultado.copiadosDeHermano+resultado.genericos} equipo(s)`);
+}
+
 // ---- Recuperar documentos: ver recuperarDocsEstado/renderRecuperarDocumentos/iniciarRecuperacionDocumentos
 // más abajo, junto a Servicios (ver siguiente bloque). ----
 /* ---- Recuperar documentos: hasta ahora, el contenido pesado de cada documento adjunto a un equipo
