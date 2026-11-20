@@ -6551,7 +6551,7 @@ function renderDesprogramarPreventivo(m){
 }
 // Panel para eliminar por completo un mantenimiento ya completado (en verde) — ver
 // puedeEliminarMantenimientoCompletado() y eliminarMantenimientoCompletado() para quién y cuándo
-// aplica. Exclusivo de Administrador, igual que "Eliminar registro" para uno cancelado.
+// aplica (Administrador, o Biomédico Administrativo dentro de sus servicios asignados).
 function renderEliminarMantenimientoCompletado(m){
   return `
   <div class="card card-pad" style="margin-top:14px;">
@@ -6624,12 +6624,22 @@ function eliminarMantenimientoCancelado(id){
 }
 // ¿Puede el usuario con sesión iniciada eliminar por completo un mantenimiento ya completado (en
 // verde en el Inventario y el Cronograma)? Pensado para corregir un mantenimiento marcado como
-// cumplido por error (equipo o fecha equivocada, una prueba) — no como parte del flujo normal, por
-// eso se reserva exclusivamente a Administrador, mismo criterio que puedeEliminarMantenimientoCancelado
-// y puedeEditarFechasMantenimiento ("corrección administrativa excepcional"). Aplica a cualquier
-// tipo de mantenimiento (preventivo o correctivo), ya que ambos pueden quedar marcados como cumplidos.
+// cumplido por error (equipo o fecha equivocada, una prueba) — no como parte del flujo normal.
+// Disponible para Administrador (sin restricción de servicio) y también para Biomédico
+// Administrativo, pero este último solo sobre equipos de su(s) servicio(s) asignado(s) — o de un
+// equipo para el que tenga un permiso puntual aprobado (ver tienePermisoTemporalVigente) — mismo
+// criterio que puedeDesprogramarPreventivo. Aplica a cualquier tipo de mantenimiento (preventivo o
+// correctivo), ya que ambos pueden quedar marcados como cumplidos.
 function puedeEliminarMantenimientoCompletado(m){
-  return !!(m && m.estado==='completado' && puedeEditarFechasMantenimiento());
+  if(!m || m.estado!=='completado') return false;
+  const usr = usuarioActual();
+  if(!usr) return false;
+  if(usr.rol==='administrador') return true;
+  if(usr.rol==='biomedico_administrativo'){
+    const eq = byId(state.equipos, m.equipoId);
+    return !!(eq && (responsableTieneServicio(usr, eq.servicio) || tienePermisoTemporalVigente(usr, eq)));
+  }
+  return false;
 }
 function eliminarMantenimientoCompletado(id){
   const m = byId(state.mantenimientos, id);
