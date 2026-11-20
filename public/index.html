@@ -3699,6 +3699,82 @@ function parseFechaImport(val){
 // calcularAutocompletadoTecnico), sin repetir el nombre de cada campo en varios lugares.
 const CAMPOS_REGISTRO_TECNICO = ['fuenteAlimentacion','frecuenciaHz','capacidad','voltajeMax','voltajeMin','corrienteMax','corrienteMin','temperatura','velocidad','presion','potencia','humedad','pesoKg','dimensionesCm','manual'];
 
+// ---- Propagar registro técnico a equipos "hermanos" (mismo tipo+marca+modelo+servicio) ----
+// Cuando alguien completa o corrige el Registro técnico (los campos de abajo, más el N° de registro
+// INVIMA, el fabricante y las recomendaciones) de un equipo YA existente, lo más probable es que esos
+// mismos datos apliquen igual a los demás equipos idénticos (mismo tipo, marca y modelo) del mismo
+// servicio, porque en la práctica son unidades iguales — exactamente el mismo razonamiento que ya usa
+// calcularAutocompletadoTecnico al importar un equipo nuevo, pero ahora ofrecido como una pregunta al
+// guardar la EDICIÓN de uno que ya existía (ver camposRegistroTecnicoModificados /
+// equiposPropagablesRegistroTecnico / ofrecerPropagarRegistroTecnico, usados desde submitInvForm).
+// Igual que en esa función, nunca pisa un dato que el equipo destino YA tenga, aunque sea distinto.
+const CAMPOS_PROPAGABLES_PLANOS = CAMPOS_REGISTRO_TECNICO.concat(['registroSanitario','recomendaciones']);
+const CAMPOS_PROPAGABLES_LABELS = {
+  fuenteAlimentacion:'Fuente de alimentación', frecuenciaHz:'Frecuencia (Hz)', capacidad:'Capacidad',
+  voltajeMax:'Voltaje máx', voltajeMin:'Voltaje mín', corrienteMax:'Corriente máx', corrienteMin:'Corriente mín',
+  temperatura:'Temperatura', velocidad:'Velocidad', presion:'Presión', potencia:'Potencia', humedad:'Humedad',
+  pesoKg:'Peso (Kg)', dimensionesCm:'Dimensiones (CM)', manual:'Manual',
+  registroSanitario:'N° Registro INVIMA', recomendaciones:'Recomendaciones', fabricante:'Datos del fabricante'
+};
+function valorVacio(v){ return v===null || v===undefined || v===''; }
+// Compara los valores de un equipo ANTES de guardar el formulario contra los que se acaban de
+// escribir, y devuelve solo los campos "propagables" que de verdad cambiaron a un valor no vacío (no
+// tiene sentido ofrecer propagar un campo que se dejó igual, o que se vació).
+function camposRegistroTecnicoModificados(anterior, nuevo){
+  const cambiados = CAMPOS_PROPAGABLES_PLANOS.filter(c => !valorVacio(nuevo[c]) && (nuevo[c]||'') !== (anterior[c]||''));
+  const fabAnt = (anterior.fabricante && anterior.fabricante.nombre) || '';
+  const fabNuevo = (nuevo.fabricante && nuevo.fabricante.nombre) || '';
+  if(fabNuevo && fabNuevo !== fabAnt) cambiados.push('fabricante');
+  return cambiados;
+}
+// Otros equipos del inventario, del mismo tipo+marca+modelo+servicio que `eq` (comparación sin
+// distinguir mayúsculas, tildes ni espacios — ver normTxt), a los que les falte AL MENOS uno de los
+// campos en `camposCambiados`. Solo esos entran a la pregunta de propagar; el campo que un equipo
+// destino ya tenga diligenciado (aunque sea distinto) nunca se toca.
+function equiposPropagablesRegistroTecnico(eq, camposCambiados){
+  const nTipo = normTxt(eq.tipo), nMarca = normTxt(eq.marca), nModelo = normTxt(eq.modelo), nServicio = normTxt(eq.servicio);
+  if(!nTipo || !nMarca || !nModelo || !nServicio || !camposCambiados.length) return [];
+  return state.equipos.filter(e=>
+    e.id!==eq.id && normTxt(e.tipo)===nTipo && normTxt(e.marca)===nMarca && normTxt(e.modelo)===nModelo && normTxt(e.servicio)===nServicio &&
+    camposCambiados.some(c => c==='fabricante' ? valorVacio(e.fabricante && e.fabricante.nombre) : valorVacio(e[c]))
+  );
+}
+// Copia, de `origen` a `destino`, únicamente los campos de `camposCambiados` que `destino` todavía
+// tiene vacíos — nunca reemplaza un valor que el equipo destino ya tenía.
+function aplicarRegistroTecnicoAEquipo(destino, origen, camposCambiados){
+  camposCambiados.forEach(c=>{
+    if(c==='fabricante'){
+      if(valorVacio(destino.fabricante && destino.fabricante.nombre) && origen.fabricante && origen.fabricante.nombre) destino.fabricante = Object.assign({}, origen.fabricante);
+    } else if(valorVacio(destino[c]) && !valorVacio(origen[c])){
+      destino[c] = origen[c];
+    }
+  });
+}
+// Se llama justo después de guardar la edición de un equipo existente (ver submitInvForm). Si hubo
+// cambios en el Registro técnico Y hay otros equipos hermanos a los que les falten esos datos,
+// pregunta si se quieren copiar también a esos equipos. Si no hay ninguno que califique, no molesta
+// con la pregunta.
+function ofrecerPropagarRegistroTecnico(equipoId, camposCambiados){
+  const eq = byId(state.equipos, equipoId);
+  if(!eq || !camposCambiados.length) return;
+  const candidatos = equiposPropagablesRegistroTecnico(eq, camposCambiados);
+  if(candidatos.length===0) return;
+  const etiquetas = camposCambiados.map(c=>CAMPOS_PROPAGABLES_LABELS[c]||c).join(', ');
+  openConfirm(
+    'Aplicar también a equipos iguales',
+    `Actualizaste ${etiquetas} de "${eq.nombre}" (${eq.marca} ${eq.modelo}). Hay ${candidatos.length} equipo(s) del mismo tipo, marca y modelo en el servicio "${eq.servicio}" que todavía no tienen ese dato. ¿Quieres copiárselo también a esos equipos? (Nunca se reemplaza un dato que un equipo ya tenga).`,
+    ()=>{
+      commit(s=>{
+        const origen = byId(s.equipos, equipoId);
+        equiposPropagablesRegistroTecnico(origen, camposCambiados).forEach(destino=>{
+          aplicarRegistroTecnicoAEquipo(destino, origen, camposCambiados);
+        });
+      }, `Registro técnico copiado a ${candidatos.length} equipo(s) ✓`);
+    },
+    { confirmLabel: `Sí, aplicar a ${candidatos.length} equipo(s)` }
+  );
+}
+
 // Catálogo mínimo de fabricantes de equipos médicos ampliamente reconocidos, usado SOLO como última
 // alternativa al importar un inventario, cuando no hay ningún equipo propio ya registrado con la
 // misma marca y modelo del que copiar datos reales (ver buscarPlantillaTecnicaPorMarcaModelo). A
@@ -5062,6 +5138,9 @@ function submitInvForm(ev, id){
     // cierra al guardar este cambio — ver solicitarPermisoEquipo / aprobarSolicitudPermiso.
     const usrForm = usuarioActual();
     const usoPermisoTemporal = !!(usrForm && usrForm.rol==='biomedico_administrativo' && !responsableTieneServicio(usrForm, eqExistente.servicio));
+    // Se compara ANTES de guardar, contra los valores que tenía el equipo hasta ahora, para saber si
+    // de verdad se modificó algo del Registro técnico (ver ofrecerPropagarRegistroTecnico más abajo).
+    const camposCambiados = camposRegistroTecnicoModificados(eqExistente, data);
     commit(s=>{
       const eq = byId(s.equipos, id);
       Object.assign(eq, data);
@@ -5079,6 +5158,7 @@ function submitInvForm(ev, id){
       }
     }, 'Equipo actualizado ✓');
     go('inv-detail',{id},'Detalle');
+    ofrecerPropagarRegistroTecnico(id, camposCambiados);
   } else {
     const newId = uid('e');
     commit(s=>{ s.equipos.push({ id:newId, ...data }); }, 'Equipo agregado al inventario ✓');
