@@ -1621,7 +1621,8 @@ async function cicloGuardado(){
           toast('⚠ No se pudo terminar de combinar los cambios con el servidor tras muchos intentos; tu cambio quedó a salvo en este navegador y se terminará de guardar automáticamente en el próximo guardado.');
           continue;
         }
-        toast('Alguien más guardó cambios desde otro navegador justo antes; combinando tu cambio con el más reciente…');
+        // (Antes se avisaba aquí con un toast cada vez que esto pasaba; se quitó el aviso a pedido del
+        // usuario — la fusión y el reintento siguen funcionando exactamente igual, solo que en silencio.)
         state = r.servidor.state;
         servidorVersion = r.servidor.version;
         pendingMutators.forEach(p=>p.fn(state)); // reaplica TODO lo pendiente sobre los datos recién llegados
@@ -3054,14 +3055,16 @@ function puedeCargarProtocoloVencido(){
   const usr = usuarioActual();
   return !!(usr && (usr.rol==='administrador' || usr.rol==='coordinador_biomedico' || usr.rol==='biomedico_administrativo'));
 }
-// ¿Este preventivo quedó programado en un mes anterior al actual sin realizarse (no basta con
-// estar vencido por días dentro del mismo mes)? Habilita la carga de un protocolo digital que lo
-// cuente como cumplido — ver puedeCargarProtocoloVencido() y renderCargaProtocoloVencido().
-function preventivoVencidoDeMesAnterior(m){
+// ¿Este preventivo ya quedó vencido sin realizarse (la fecha programada ya pasó)? Habilita la
+// carga de un protocolo digital que lo cuente como cumplido — ver puedeCargarProtocoloVencido() y
+// renderCargaProtocoloVencido(). Se compara por día, no por mes: no importa si la fecha programada
+// cayó este mismo mes (se muestre en naranja o en rojo en los demás listados) o en uno anterior —
+// aquí lo único que importa es si el día programado ya pasó.
+function preventivoYaVencido(m){
   if(!m || m.tipo!=='preventivo') return false;
   if(m.estado!=='pendiente' && m.estado!=='en_proceso') return false;
   if(!m.fechaProgramada) return false;
-  return m.fechaProgramada.slice(0,7) < today().slice(0,7);
+  return m.fechaProgramada < today();
 }
 // ¿Este equipo es de comodato? Se considera comodato si está asignado a un contrato de
 // mantenimiento de tipo "comodato" (ver contratoDeEquipo), o si en su hoja de vida el campo
@@ -3075,8 +3078,8 @@ function equipoEsComodato(eq){
   return !!(eq.formaAdquisicion && /comodato/i.test(eq.formaAdquisicion));
 }
 // ¿Se puede cargar el protocolo digital de este preventivo (PDF o imagen) para marcarlo como
-// cumplido, sin pasar por el checklist habitual? Siempre que esté vencido de un mes anterior (ver
-// preventivoVencidoDeMesAnterior) — y también, aunque todavía no esté vencido, cuando el equipo
+// cumplido, sin pasar por el checklist habitual? Siempre que ya esté vencido (ver
+// preventivoYaVencido) — y también, aunque todavía no esté vencido, cuando el equipo
 // es de comodato (ver equipoEsComodato): ahí el mantenimiento lo hace el proveedor externo dueño
 // del equipo, que suele entregar su propio protocolo/reporte antes de la fecha límite, así que no
 // tiene sentido obligar a esperar a que venza para poder registrarlo.
@@ -3084,7 +3087,7 @@ function puedeCargarProtocoloParaPreventivo(m, eq){
   if(!m || m.tipo!=='preventivo') return false;
   if(m.estado!=='pendiente' && m.estado!=='en_proceso') return false;
   if(!m.fechaProgramada) return false;
-  if(preventivoVencidoDeMesAnterior(m)) return true;
+  if(preventivoYaVencido(m)) return true;
   return equipoEsComodato(eq);
 }
 /* Equipos cuyo campo "Contrato de mantenimiento" corresponde al contrato dado. Misma convención
@@ -6158,12 +6161,12 @@ function submitReasignarCorrectivo(ev, id){
   return false;
 }
 
-// Panel para cargar un protocolo digital (PDF o imagen) en un preventivo programado en un mes
-// anterior al actual que no se realizó a tiempo, y contarlo como cumplido con esa evidencia en
-// vez del flujo habitual de checklist y firmas. Ver puedeCargarProtocoloVencido() y
-// preventivoVencidoDeMesAnterior() para quién y cuándo aplica.
+// Panel para cargar un protocolo digital (PDF o imagen) en un preventivo ya vencido que no se
+// realizó a tiempo, y contarlo como cumplido con esa evidencia en vez del flujo habitual de
+// checklist y firmas. Ver puedeCargarProtocoloVencido() y preventivoYaVencido() para quién y
+// cuándo aplica.
 function renderCargaProtocoloVencido(m, eq){
-  const vencido = preventivoVencidoDeMesAnterior(m);
+  const vencido = preventivoYaVencido(m);
   const contrato = contratoDeEquipo(eq);
   const esComodato = !vencido && equipoEsComodato(eq);
   const nombreComodato = (contrato && contrato.tipo==='comodato') ? ` (${esc(contrato.nombre)})` : '';
@@ -6189,7 +6192,7 @@ async function submitProtocoloVencido(ev, id){
   if(!puedeCargarProtocoloVencido()){ toast('No tienes permiso para realizar esta acción'); return false; }
   const m = byId(state.mantenimientos, id);
   const eqPrevio = m ? byId(state.equipos, m.equipoId) : null;
-  if(!puedeCargarProtocoloParaPreventivo(m, eqPrevio)){ toast('Esta acción solo aplica a preventivos vencidos de meses anteriores, o a equipos en comodato'); return false; }
+  if(!puedeCargarProtocoloParaPreventivo(m, eqPrevio)){ toast('Esta acción solo aplica a preventivos vencidos, o a equipos en comodato'); return false; }
   const f = ev.target;
   const file = f.protocoloArchivo.files[0];
   if(!file){ toast('Selecciona el archivo del protocolo (PDF o imagen)'); return false; }
