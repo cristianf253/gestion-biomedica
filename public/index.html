@@ -5921,6 +5921,17 @@ function renderMantDetalle(id){
 }
 
 function renderMantUpdatePanel(m, eq){
+  if(m.estado==='cancelado'){
+    const puedeEliminar = puedeEliminarMantenimientoCancelado(m);
+    return `
+    <div class="section-title">Actualizar estado</div>
+    <div class="card card-pad">
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:${puedeEliminar?'12':'0'}px;">Este mantenimiento quedó registrado como cancelado.${puedeEliminar?' Si la cancelación fue por error o una prueba, puedes eliminar este registro por completo.':''}</p>
+      ${puedeEliminar ? `<div class="btnrow">
+        <button class="btn btn-danger" onclick="eliminarMantenimientoCancelado('${m.id}')">${icon('trash',14)}Eliminar registro</button>
+      </div>` : ''}
+    </div>`;
+  }
   if(m.estado==='pendiente'){
     const puedeIniciar = puedeIniciarIntervencion();
     return `
@@ -6403,6 +6414,34 @@ function puedeDesprogramarPreventivo(m){
     return !!(eq && (responsableTieneServicio(usr, eq.servicio) || tienePermisoTemporalVigente(usr, eq)));
   }
   return false;
+}
+// ¿Puede el usuario con sesión iniciada eliminar por completo un mantenimiento ya cancelado? Pensado
+// para corregir cancelaciones hechas por error o registros de prueba (programar y luego cancelar),
+// no como parte del flujo normal — por eso, a diferencia de Desprogramar, se reserva exclusivamente
+// a Administrador (igual que puedeEditarFechasMantenimiento, con el que comparte el mismo criterio
+// de "corrección administrativa excepcional"). Aplica a cualquier tipo de mantenimiento, no solo
+// preventivo, ya que "Cancelar" existe para todos ellos.
+function puedeEliminarMantenimientoCancelado(m){
+  return !!(m && m.estado==='cancelado' && puedeEditarFechasMantenimiento());
+}
+function eliminarMantenimientoCancelado(id){
+  const m = byId(state.mantenimientos, id);
+  if(!puedeEliminarMantenimientoCancelado(m)){ toast('No tienes permiso para eliminar este registro'); return; }
+  openConfirm(
+    'Eliminar registro cancelado',
+    'Esto borra por completo este mantenimiento del historial, como si nunca hubiera existido (a diferencia de "Cancelar", no queda ningún rastro). Úsalo solo para corregir una cancelación hecha por error o un registro de prueba, no como parte del flujo normal. Si es un preventivo, se recalculará automáticamente la próxima fecha de mantenimiento del equipo. ¿Confirmas que quieres eliminarlo?',
+    ()=>{
+      commit(s=>{
+        const mm = byId(s.mantenimientos, id);
+        if(!mm) return;
+        const eq = byId(s.equipos, mm.equipoId);
+        s.mantenimientos = s.mantenimientos.filter(x=>x.id!==id);
+        if(eq && mm.tipo==='preventivo') recalcularProximoPreventivoCompleto(s, eq);
+      }, 'Registro cancelado eliminado');
+      goBack();
+    },
+    { danger:true, confirmLabel:'Sí, eliminar' }
+  );
 }
 // Recalcula eq.fechaProximoPreventivo desde cero tras eliminar/desprogramar un preventivo pendiente,
 // cuando no es evidente cuál debería ser la próxima fecha porque ya no existe el registro que la
