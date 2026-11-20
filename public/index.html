@@ -3439,6 +3439,7 @@ function renderScreen(scr){
       case 'config-recuperar-docs': return renderRecuperarDocumentos();
       case 'config-completar-recomendaciones': return renderCompletarRecomendaciones();
       case 'config-carga-confianza-2026': return renderCargaConfianza2026();
+      case 'config-conciliar-consulta-externa': return renderConciliarConsultaExterna();
       default: return renderHome();
     }
   }catch(e){
@@ -7594,6 +7595,7 @@ function renderConfigMenu(){
     ${tileButton({icon:'upload', title:'Recuperar documentos', desc:'Sube al servidor los documentos adjuntos que solo quedaron guardados en este navegador (por eso no se ven desde otros equipos).', onclick:"go('config-recuperar-docs',{},'Recuperar documentos')"})}
     ${usr && usr.rol==='administrador' ? tileButton({icon:'clipboard', title:'Completar Recomendaciones', desc:'Completa la casilla "Recomendaciones" de los equipos que no la tienen, copiándola de un equipo propio del mismo modelo o usando un texto general si no hay ninguno.', onclick:"go('config-completar-recomendaciones',{},'Completar Recomendaciones')"}) : ''}
     ${usr && usr.rol==='administrador' ? tileButton({icon:'upload', title:'Carga de casos de confianza 2026', desc:'Herramienta temporal: crea los 89 mantenimientos preventivos de 2026 confirmados en la auditoría de reportes de Drive. Bórrala cuando termines de usarla.', onclick:"go('config-carga-confianza-2026',{},'Carga de casos de confianza 2026')"}) : ''}
+    ${usr && usr.rol==='administrador' ? tileButton({icon:'building', title:'Conciliar Consulta Externa', desc:'Herramienta temporal: contrarresta el inventario contra CONS_EXTERN.xlsx (crea, reasigna y marca pendiente de ubicar). Bórrala cuando termines de usarla.', onclick:"go('config-conciliar-consulta-externa',{},'Conciliar Consulta Externa')"}) : ''}
     ${puedeRealizarAccion('vaciarDatos') ? tileButton({icon:'trash', title:'Vaciar todos los datos', desc:'Elimina equipos, mantenimientos, alertas, responsables y contratos.', onclick:"askVaciarDatos()"}) : ''}
   </div>`;
 }
@@ -9010,6 +9012,136 @@ async function iniciarCargaConfianza2026(){
   toast(resultado.error ? ('Ocurrió un problema: '+resultado.error) : `Carga terminada: ${resultado.creados} creado(s), ${resultado.yaExistian} ya existían, ${resultado.sinEquipo} sin equipo`);
 }
 /* ===== FIN BLOQUE TEMPORAL: Carga de casos de confianza 2026 ===== */
+/* ===== BLOQUE TEMPORAL: Conciliar inventario de Consulta Externa contra el Excel "CONS_EXTERN.xlsx"
+   (ver conversación con el usuario) — contrarresta el inventario de la app contra ese Excel y deja en
+   CONSULTA EXTERNA exactamente los equipos que el Excel confirma, en tres pasos:
+   1) CREA los equipos del Excel que no existían todavía en el inventario (ni por serie ni por código),
+      asignados a CONSULTA EXTERNA con la ubicación (consultorio/recepción) que trae el Excel.
+   2) REASIGNA a CONSULTA EXTERNA los equipos que ya existían pero en OTRO servicio, porque el Excel los
+      confirma como de Consulta Externa (coincide su serie o su código de activo fijo).
+   3) MUEVE a servicio "PENDIENTE UBICACIÓN" los equipos que hoy están en CONSULTA EXTERNA pero que el
+      Excel NO confirma — no se eliminan, solo quedan marcados para ubicar.
+   Esto es SOLO la parte seguro/sin ambigüedad de la conciliación: quedaron fuera a propósito (y se
+   entregan en un archivo aparte para revisión manual) los casos de equipos con código repetido o que
+   podrían ser el mismo duplicado contado dos veces (sobre todo "EQUIPO DE ORGANOS DE LOS SENTIDOS",
+   "BASCULA/BASCULO", "NEGATOSCOPIO" y "TENSIOMETRO"), y un caso puntual (un NASOFIBROSCOPIO que ya
+   estaba asignado a CIRUGIA de un trabajo anterior documentado) que coincide por número de serie con un
+   equipo de este Excel — posible conflicto real entre inventarios, no se movió automáticamente.
+   Es seguro presionar el botón más de una vez: antes de crear cada equipo comprueba que no exista ya
+   uno igual, y las reasignaciones/movimientos no repiten nada que ya haya quedado aplicado. Bórralo
+   cuando termines de aplicarlo. ===== */
+let conciliarConsultaExternaEstado = null; // null=sin iniciar; 'corriendo'; o resultado
+const CONCILIAR_CE_CREAR = [{"nombre": "TALLIMETRO", "codigo": "", "marca": "SECA", "modelo": "", "serie": "", "ubicacion": "RECEPCION 1", "frecuenciaPreventivaMeses": 6}, {"nombre": "TALLIMETRO", "codigo": "2201759", "marca": "SECA", "modelo": "", "serie": "", "ubicacion": "RECEPCION 2", "frecuenciaPreventivaMeses": 6}, {"nombre": "INFANTOMETRO", "codigo": "2201769", "marca": "SECA", "modelo": "", "serie": "", "ubicacion": "RECEPCION 2", "frecuenciaPreventivaMeses": 6}, {"nombre": "INFANTOMETRO", "codigo": "2201770", "marca": "SECA", "modelo": "", "serie": "", "ubicacion": "RECEPCION 2", "frecuenciaPreventivaMeses": 6}, {"nombre": "TALLIMETRO", "codigo": "2201756", "marca": "SECA", "modelo": "", "serie": "", "ubicacion": "RECEPCION 3", "frecuenciaPreventivaMeses": 6}, {"nombre": "INFANTOMETRO", "codigo": "2201396", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "RECEPCION 3", "frecuenciaPreventivaMeses": 6}, {"nombre": "TALLIMETRTO", "codigo": "2201756", "marca": "SECA", "modelo": "", "serie": "10000001722883", "ubicacion": "RECEPCION 4", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO DOBLE", "codigo": "220112", "marca": "RIESTER", "modelo": "DUPLEX 2,0", "serie": "", "ubicacion": "CONSULTORIO 1", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO REFLEJOS", "codigo": "220020", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 1", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 1", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 2", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO REFLEJOS", "codigo": "", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 2", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "2200616", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 2", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "2200658", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 3", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 3", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "2200658", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 4", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO REFLEJOS", "codigo": "mc166000701-1137", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 4", "frecuenciaPreventivaMeses": 6}, {"nombre": "TALLIMETRO", "codigo": "", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 4", "frecuenciaPreventivaMeses": null}, {"nombre": "FONENDOSCOPIO", "codigo": "475", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 5", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO REFLEJOS", "codigo": "MC16600701-1137", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 5", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 5", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "02200658/AF0475", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 6", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO REFLEJOS", "codigo": "mc-16600701-1137", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 6", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "2200609", "marca": "WELCH ALLYN", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 6", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 7", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO REFLEJOS", "codigo": "", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 7", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 7", "frecuenciaPreventivaMeses": null}, {"nombre": "FONENDOSCOPIO", "codigo": "AF: 1380", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 8", "frecuenciaPreventivaMeses": 6}, {"nombre": "MARTILLO REFLEJOS", "codigo": "MC166007-0184/AF.0449", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 8", "frecuenciaPreventivaMeses": 6}, {"nombre": "TALLIMETRO", "codigo": "210141", "marca": "", "modelo": "210141", "serie": "", "ubicacion": "CONSULTORIO 8", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "02200646 AF: 411", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 9", "frecuenciaPreventivaMeses": 6}, {"nombre": "MARTILLO REFLEJOS", "codigo": "2200608", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 9", "frecuenciaPreventivaMeses": 6}, {"nombre": "TALLIMETRO", "codigo": "2200608", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 9", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO DE DOBLE", "codigo": "MC166099010-2963", "marca": "RIESTER", "modelo": "DUPLEX 2,0", "serie": "", "ubicacion": "CONSULTORIO 10", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO REFLEJOS", "codigo": "2200769", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 10", "frecuenciaPreventivaMeses": null}, {"nombre": "FONENDOSCOPIO", "codigo": "CON 11", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 11", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO REFLEJOS", "codigo": "MC160007-0189", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 11", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "2201142", "marca": "KRAMER", "modelo": "206", "serie": "", "ubicacion": "CONSULTORIO 11", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "C12", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 12", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO REFLEJOS", "codigo": "MC16609010-1132", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 12", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "2200612", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 12", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "MC166007-0184", "marca": "ALPK2", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 14", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO REFLEJOS", "codigo": "2200761", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 14", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "", "marca": "KRAMER", "modelo": "CE0050", "serie": "", "ubicacion": "CONSULTORIO 14", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "MC16609010-2955/ AF: 0436", "marca": "WELCH ALLYN", "modelo": "SPECTRUM", "serie": "", "ubicacion": "CONSULTORIO 15", "frecuenciaPreventivaMeses": 6}, {"nombre": "MARTILLO REFLEJOS", "codigo": "2200768", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 15", "frecuenciaPreventivaMeses": 6}, {"nombre": "TALLIMETRO", "codigo": "2200610", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 15", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "MC16609010-2954", "marca": "ALPK2", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 16", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO DE REFLEJOS", "codigo": "MC166007-0205", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 16", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "2200607", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 16", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "MC16609010-2757/AF: 0478", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 17", "frecuenciaPreventivaMeses": 6}, {"nombre": "TALLIMETRO", "codigo": "2200780", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 17", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "MC16600701-0294/AF: 0397", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 18", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO DE REFLEJOS", "codigo": "2200762", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 18", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "2200606", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 18", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "MC16609010-2955 / AF: 0479", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 19", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO DE REFLEJOS", "codigo": "MC166007-0207", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 19", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "2200613", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 19", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "2200660", "marca": "ALPK2", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 20", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO REFLEJOS", "codigo": "2200763", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 20", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "2200612", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 20", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "MC16609010-2958", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 21", "frecuenciaPreventivaMeses": null}, {"nombre": "INFANTOMETRO", "codigo": "2201396", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 21", "frecuenciaPreventivaMeses": 6}, {"nombre": "MARTILLO DE REFLEJOS", "codigo": "2200764", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 21", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "2200605", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 21", "frecuenciaPreventivaMeses": 6}, {"nombre": "", "codigo": "", "marca": "CONSULTORIO 22", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 21", "frecuenciaPreventivaMeses": null}, {"nombre": "FONENDOSCOPIO", "codigo": "MC16609010-2959/AF: 0399", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 21", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO DE REFLEJOS", "codigo": "2200759", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 21", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "2200603", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 21", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "2200662", "marca": "ALPK2", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 23", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO DE REFLEJOS", "codigo": "2201028", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 23", "frecuenciaPreventivaMeses": null}, {"nombre": "INFANTOMETRO", "codigo": "22011768", "marca": "SECA", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 23", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "2200645", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 24", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO DE REFLEJOS", "codigo": "2200765", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 24", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "2200615", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 24", "frecuenciaPreventivaMeses": 6}, {"nombre": "INFANTOMETRO", "codigo": "2201771", "marca": "SECA", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 24", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "2200661", "marca": "ALPK2", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 25", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO DE REFLEJOS", "codigo": "2201030", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 25", "frecuenciaPreventivaMeses": null}, {"nombre": "TALLIMETRO", "codigo": "2200616", "marca": "KRAMER", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 25", "frecuenciaPreventivaMeses": 6}, {"nombre": "FONENDOSCOPIO", "codigo": "MC16609010-2961/AF:0367", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 26", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO DE REFLEJOS", "codigo": "2200766", "marca": "", "modelo": "", "serie": "", "ubicacion": "CONSULTORIO 26", "frecuenciaPreventivaMeses": null}, {"nombre": "FONENDOSCOPIO", "codigo": "MC16609010-2961/AF:0367", "marca": "", "modelo": "", "serie": "", "ubicacion": "MAMA CANGURO", "frecuenciaPreventivaMeses": null}, {"nombre": "MARTILLO DE REFLEJOS", "codigo": "2200766", "marca": "", "modelo": "", "serie": "", "ubicacion": "MAMA CANGURO", "frecuenciaPreventivaMeses": null}, {"nombre": "", "codigo": "", "marca": "", "modelo": "EXCLUSIVOS", "serie": "", "ubicacion": "MAMA CANGURO", "frecuenciaPreventivaMeses": null}, {"nombre": "", "codigo": "CONSULTA EXTERNA", "marca": "(CONSULTORIOA)", "modelo": "PROCEDIMIETOS OFTAMOLOGI", "serie": "", "ubicacion": "MAMA CANGURO", "frecuenciaPreventivaMeses": null}, {"nombre": "LASER DE FOTODISRUPCIÓN", "codigo": "2200898", "marca": "KARL ZEISS", "modelo": "VISULAS YAG III", "serie": "1183941/1183599", "ubicacion": "MAMA CANGURO", "frecuenciaPreventivaMeses": 12}, {"nombre": "BIOMETRO DIGITAL", "codigo": "02200084/AF: 0482", "marca": "SONOMED", "modelo": "PACSCAN300AP", "serie": "0300-0708-5429", "ubicacion": "MAMA CANGURO", "frecuenciaPreventivaMeses": 12}, {"nombre": "CAMPIMETRO", "codigo": "2200756", "marca": "OPTOPOL", "modelo": "PTS1000", "serie": "832/0", "ubicacion": "MAMA CANGURO", "frecuenciaPreventivaMeses": 12}, {"nombre": "REGLA BIOMETRICA", "codigo": "2200899", "marca": "SONOMED", "modelo": "300A", "serie": "0350-0717- 3957", "ubicacion": "MAMA CANGURO", "frecuenciaPreventivaMeses": 12}, {"nombre": "PRIMAS OFTALMOLOGICOS", "codigo": "MC166007-0204/AF:4821", "marca": "", "modelo": "", "serie": "", "ubicacion": "MAMA CANGURO", "frecuenciaPreventivaMeses": 12}, {"nombre": "", "codigo": "", "marca": "CONSULTA EXTERNA CONSULTORIO 10", "modelo": "", "serie": "", "ubicacion": "MAMA CANGURO", "frecuenciaPreventivaMeses": null}, {"nombre": "LENTE", "codigo": "2200755", "marca": "MAXFIELD", "modelo": "STD 90 D", "serie": "", "ubicacion": "MAMA CANGURO", "frecuenciaPreventivaMeses": 6}, {"nombre": "LASER INTELECT", "codigo": "2300106", "marca": "CHATTANOOGA", "modelo": "CH-2779", "serie": "T6478", "ubicacion": "REHABILITACION", "frecuenciaPreventivaMeses": 6}, {"nombre": "COMBO INTELECT", "codigo": "", "marca": "CHATTANOOGA", "modelo": "CH2762CC", "serie": "T5245", "ubicacion": "REHABILITACION", "frecuenciaPreventivaMeses": 6}, {"nombre": "COMBO VARIAS CORRIENTES", "codigo": "", "marca": "CHATTANOOGA", "modelo": "CH-2778", "serie": "T7939", "ubicacion": "REHABILITACION", "frecuenciaPreventivaMeses": 6}, {"nombre": "COMBO DE VARIAS CORRIENTES", "codigo": "2300094", "marca": "CHATTANOOGA", "modelo": "CHATTANOOGA", "serie": "CH4749", "ubicacion": "REHABILITACION", "frecuenciaPreventivaMeses": 6}, {"nombre": "MAQUINA DE MOVIMIENTO PASIVO PARA RODILLA", "codigo": "", "marca": "ARTROMOT", "modelo": "K12300092", "serie": "28024", "ubicacion": "REHABILITACION", "frecuenciaPreventivaMeses": 6}, {"nombre": "AUDIOMETRO", "codigo": "", "marca": "FONIX", "modelo": "FA-12", "serie": "1053", "ubicacion": "REHABILITACION", "frecuenciaPreventivaMeses": 12}, {"nombre": "IMPEDANCIOMETRO", "codigo": "2200704", "marca": "INTERACUSTISC", "modelo": "AT235", "serie": "900464", "ubicacion": "REHABILITACION", "frecuenciaPreventivaMeses": 12}, {"nombre": "CRIOCAUTERIO", "codigo": "021100097/AF:4824", "marca": "LEISEGAN", "modelo": "LM-900", "serie": "101015", "ubicacion": "CONSULTORIO 17", "frecuenciaPreventivaMeses": 6}, {"nombre": "VIDEOCOLPOSCOPIO", "codigo": "02200298/AF: 0520", "marca": "ECLERIS", "modelo": "C100F1", "serie": "C100F1R0110122895", "ubicacion": "CONSULTORIO 17", "frecuenciaPreventivaMeses": 6}, {"nombre": "ELECTROCAUTERIO", "codigo": "2301414", "marca": "LED SPA", "modelo": "SURTRON 50 D", "serie": "360-0253675", "ubicacion": "CONSULTORIO 23", "frecuenciaPreventivaMeses": 6}];
+const CONCILIAR_CE_REASIGNAR = [{"equipoId": "e_mwcqn4oj37hve", "ubicacion": "Rehabilitacion BAJA"}, {"equipoId": "e_mwcqn4ojogjyh", "ubicacion": "REHABILITACION"}, {"equipoId": "e_mwcqn4ojtpqt3", "ubicacion": "Rehabilitacion BAJA"}, {"equipoId": "e_mwcqn4ojjgan8", "ubicacion": "Rehabilitacion BAJA"}, {"equipoId": "e_mwcqn4ojijxqs", "ubicacion": "Rehabilitacion BAJA"}, {"equipoId": "e_mwcqn4ojjyg7j", "ubicacion": "REHABILITACION"}];
+const CONCILIAR_CE_MOVER = [{"equipoId": "e_mtw67sss5j0sw"}, {"equipoId": "e_mwcqn4ogwcymc"}, {"equipoId": "e_mwcqn4ogy0naw"}, {"equipoId": "e_mwcqn4oi081dx"}, {"equipoId": "e_mwcqn4oi0xtln"}, {"equipoId": "e_mwcqn4oi1ziz7"}, {"equipoId": "e_mwcqn4oi41pn6"}, {"equipoId": "e_mwcqn4oibnp4t"}, {"equipoId": "e_mwcqn4oigqykv"}, {"equipoId": "e_mwcqn4oij9c1z"}, {"equipoId": "e_mwcqn4oila82c"}, {"equipoId": "e_mwcqn4oimd75b"}, {"equipoId": "e_mwcqn4oiqs2x1"}, {"equipoId": "e_mwcqn4oivzywd"}, {"equipoId": "e_mwcqn4oiy0lt1"}, {"equipoId": "e_mwcqn4ojd8vb0"}, {"equipoId": "e_mwcqn4ojkucyi"}];
+function renderConciliarConsultaExterna(){
+  const usr = usuarioActual();
+  if(!usr || usr.rol!=='administrador') return emptyState('alert','Sin permiso','Solo un Administrador puede usar esta herramienta.');
+  const est = conciliarConsultaExternaEstado;
+  return `
+  <div class="page-head"><h1>Conciliar Consulta Externa (Excel)</h1><p>Herramienta temporal: contrarresta el inventario de Consulta Externa contra "CONS_EXTERN.xlsx". Va a crear ${CONCILIAR_CE_CREAR.length} equipo(s) nuevo(s), reasignar ${CONCILIAR_CE_REASIGNAR.length} equipo(s) que estaban en otro servicio, y mover ${CONCILIAR_CE_MOVER.length} equipo(s) que hoy están en Consulta Externa a "PENDIENTE UBICACIÓN" porque el Excel no los confirma.</p></div>
+  ${!est ? `
+    <div class="card card-pad">
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:14px;"><b>Este botón hay que presionarlo tú mismo, desde tu navegador</b> — es una escritura masiva a los datos compartidos del servidor. Es seguro presionarlo más de una vez.</p>
+      <div class="btnrow"><button class="btn btn-primary" onclick="iniciarConciliarConsultaExterna()">${icon('upload',14)}Conciliar Consulta Externa</button></div>
+    </div>`
+  : est==='corriendo' ? `<div class="card card-pad" style="text-align:center;color:var(--text-2);">${icon('clock',18)} Conciliando…</div>`
+  : `
+    <div class="card card-pad">
+      <div class="section-title" style="margin-top:0;">Resultado</div>
+      <p style="font-size:13.5px;line-height:1.8;">
+        <b>${est.creados}</b> equipo(s) nuevo(s) creado(s) en Consulta Externa.<br/>
+        <b>${est.reasignados}</b> equipo(s) reasignado(s) a Consulta Externa (venían de otro servicio).<br/>
+        <b>${est.movidos}</b> equipo(s) movido(s) a "PENDIENTE UBICACIÓN".<br/>
+        <b>${est.yaHechos}</b> ya estaban aplicados (sin cambio).
+        ${est.error?`<br/><b style="color:var(--critical);">Error:</b> ${esc(est.error)}`:'<br/>Guardado correctamente en el servidor.'}
+      </p>
+      <div class="btnrow" style="margin-top:14px;"><button class="btn" onclick="conciliarConsultaExternaEstado=null; render();">${icon('refresh',14)}Volver</button></div>
+    </div>`}
+  `;
+}
+async function iniciarConciliarConsultaExterna(){
+  const usr = usuarioActual();
+  if(!usr || usr.rol!=='administrador'){ toast('Solo un Administrador puede usar esta herramienta'); return; }
+  conciliarConsultaExternaEstado = 'corriendo';
+  render();
+  const resultado = { creados:0, reasignados:0, movidos:0, yaHechos:0, error:null };
+  try{
+    let intentos = 0, terminado = false;
+    while(intentos<5 && !terminado){
+      intentos++;
+      await loadInitialState();
+      let creados=0, reasignados=0, movidos=0, yaHechos=0;
+
+      CONCILIAR_CE_CREAR.forEach((info, idx)=>{
+        const yaExiste = state.equipos.some(e=>
+          normTxt(e.nombre)===normTxt(info.nombre) && normTxt(e.marca)===normTxt(info.marca) && normTxt(e.modelo)===normTxt(info.modelo) &&
+          normTxt(e.servicio)===normTxt('CONSULTA EXTERNA') && normTxt(e.ubicacion||'')===normTxt(info.ubicacion) &&
+          (info.serie ? normTxt(e.serie)===normTxt(info.serie) :
+            (info.codigo ? normTxt(e.codigo||'')===normTxt(info.codigo) : (!e.codigo || /^SIN-CODIGO-/i.test(e.codigo)))
+          )
+        );
+        if(yaExiste){ yaHechos++; return; }
+        const codigo = info.codigo || generarCodigoProvisional('CE'+idx);
+        const nuevo = {
+          id: uid('e'), nombre: info.nombre, tipo: info.nombre, codigo, marca: info.marca, modelo: info.modelo, serie: info.serie,
+          servicio: 'CONSULTA EXTERNA', ubicacion: info.ubicacion, estado: 'operativo', motivoFueraServicio:'',
+          riesgo:'', registroInvima:null, registroSanitario:'', certificacionDian:'', propiedad:'',
+          contratoMantenimientoId:null, responsableId:null, fechaAdquisicion:null, vidaUtilAnios:null,
+          garantiaTiempo:'', garantiaFechaExpiracion:null, cambioCeldaOxigeno:'',
+          frecuenciaPreventivaMeses: info.frecuenciaPreventivaMeses, fechaUltimoPreventivo:null, fechaProximoPreventivo:null, notas:''
+        };
+        if(nuevo.marca && nuevo.modelo){
+          const auto = calcularAutocompletadoTecnico(nuevo.marca, nuevo.modelo, null);
+          Object.assign(nuevo, auto.campos);
+          if(auto.sugerido) nuevo.datosSugeridosSinVerificar = true;
+        }
+        state.equipos.push(nuevo);
+        creados++;
+      });
+
+      CONCILIAR_CE_REASIGNAR.forEach(info=>{
+        const eq = byId(state.equipos, info.equipoId);
+        if(!eq){ return; }
+        if(normTxt(eq.servicio)===normTxt('CONSULTA EXTERNA')){ yaHechos++; return; }
+        eq.servicioAnterior = eq.servicio;
+        eq.servicio = 'CONSULTA EXTERNA';
+        eq.ubicacion = info.ubicacion || eq.ubicacion;
+        reasignados++;
+      });
+
+      CONCILIAR_CE_MOVER.forEach(info=>{
+        const eq = byId(state.equipos, info.equipoId);
+        if(!eq){ return; }
+        if(normTxt(eq.servicio)!==normTxt('CONSULTA EXTERNA')){ yaHechos++; return; }
+        eq.servicioAnterior = eq.servicio;
+        eq.servicio = 'PENDIENTE UBICACIÓN';
+        movidos++;
+      });
+
+      const r = await guardarEnServidor();
+      if(r.ok){
+        await persistLocalOnly();
+        resultado.creados = creados; resultado.reasignados = reasignados; resultado.movidos = movidos; resultado.yaHechos = yaHechos;
+        terminado = true;
+      } else if(r.code === 'conflict'){
+        continue;
+      } else {
+        resultado.error = 'No se pudo guardar en el servidor ('+(r.code||'error')+')';
+        terminado = true;
+      }
+    }
+    if(!terminado && !resultado.error) resultado.error = 'Conflicto de guardado persistente tras varios intentos; vuelve a intentarlo.';
+    await loadInitialState();
+    render();
+  }catch(e){
+    resultado.error = e.message||String(e);
+  }
+  conciliarConsultaExternaEstado = resultado;
+  render();
+  toast(resultado.error ? ('Ocurrió un problema: '+resultado.error) : `Conciliación terminada: ${resultado.creados} creados, ${resultado.reasignados} reasignados, ${resultado.movidos} movidos a pendiente`);
+}
+/* ===== FIN BLOQUE TEMPORAL: Conciliar inventario de Consulta Externa ===== */
 init();
 </script>
 </body>
