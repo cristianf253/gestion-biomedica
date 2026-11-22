@@ -4818,10 +4818,60 @@ function paresDesdeLineasPdf(lineas){
   cerrarSeccion();
   return pares;
 }
+// Reconstruye "líneas" con tabuladores entre columnas a partir de las palabras reconocidas por OCR
+// (Tesseract), replicando la misma heurística de agrupado por fila (HV_PDF_TOLERANCIA_Y) y de
+// detección de salto de columna (HV_PDF_GAP_TAB) que extraerLineasPdfConColumnas usa para la capa de
+// texto nativa del PDF — así el resto del pipeline (paresDesdeLineasPdf / paresDeLineaHojaVida)
+// reconoce igual de bien un documento escaneado que uno generado digitalmente, en vez de recibir un
+// único texto corrido donde la etiqueta y el valor de una misma fila quedan pegados sin ":" ni "-"
+// entre ellos (el caso real de una hoja de vida escaneada: casillas de etiqueta y de valor, una junto
+// a la otra, sin ningún separador impreso). Los cuadros ("bbox") de las palabras de Tesseract vienen
+// en píxeles del canvas donde se renderizó la página (ver extraerTextoPdfConOcrGenerico, que la
+// renderiza a la escala `scale`), mientras que HV_PDF_TOLERANCIA_Y/HV_PDF_GAP_TAB están calibrados en
+// puntos del PDF (escala 1) — por eso cada coordenada se divide por `scale` antes de agruparlas. Y el
+// eje Y de Tesseract crece hacia abajo (coordenadas de imagen), al revés que el de pdf.js (que crece
+// hacia arriba), así que aquí el orden de lectura de arriba hacia abajo se obtiene ordenando de forma
+// ascendente en vez de descendente.
+function lineasDesdeOcrWords(words, scale){
+  const items = (words||[])
+    .filter(w=>w && w.text && w.text.trim()!=='' && w.bbox)
+    .map(w=>({
+      str: w.text,
+      x: w.bbox.x0/scale,
+      y: w.bbox.y0/scale,
+      width: (w.bbox.x1-w.bbox.x0)/scale,
+    }))
+    .sort((a,b)=>a.y-b.y);
+  const filas = [];
+  items.forEach(it=>{
+    let fila = filas.find(f=>Math.abs(f.y-it.y)<=HV_PDF_TOLERANCIA_Y);
+    if(!fila){ fila = { y: it.y, items:[] }; filas.push(fila); }
+    fila.items.push(it);
+    fila.y = (fila.y*(fila.items.length-1) + it.y) / fila.items.length;
+  });
+  const lineas = [];
+  filas.forEach(fila=>{
+    const ordenados = fila.items.slice().sort((a,b)=>a.x-b.x);
+    let linea = '';
+    let finAnterior = null;
+    ordenados.forEach(it=>{
+      const inicio = it.x;
+      if(finAnterior!==null && inicio-finAnterior>HV_PDF_GAP_TAB){ if(!linea.endsWith('\t')) linea += '\t'; }
+      else if(linea && !linea.endsWith('\t') && !linea.endsWith(' ')) linea += ' ';
+      linea += it.str;
+      finAnterior = inicio + (it.width || it.str.length*5);
+    });
+    if(linea.trim()) lineas.push(linea);
+  });
+  return lineas;
+}
 // OCR de respaldo para hojas de vida escaneadas (imagen sin capa de texto seleccionable): igual en
 // esencia a extraerTextoPdfConOcr (usada para el checklist de protocolos), pero genérica —no
 // depende de protocoloDraft— y reporta el progreso en el elemento de estado que se le indique.
+// Devuelve "líneas" (con tabuladores entre columnas, vía lineasDesdeOcrWords) en vez de un texto
+// corrido, para que una hoja de vida escaneada se reconozca igual que una generada digitalmente.
 const CARGA_HV_OCR_MAX_PAGINAS = 20;
+const ESCALA_RENDER_OCR_HV = 2.2;
 async function extraerTextoPdfConOcrGenerico(paginas, statusEl){
   if(!window.Tesseract) throw new Error('Tesseract no disponible');
   const maxPaginas = Math.min(paginas.length, CARGA_HV_OCR_MAX_PAGINAS);
@@ -4832,22 +4882,31 @@ async function extraerTextoPdfConOcrGenerico(paginas, statusEl){
       }
     }
   });
-  let fullText = '';
+  const lineas = [];
   try{
     for(let i=0;i<maxPaginas;i++){
       const page = paginas[i];
-      const viewport = page.getViewport({ scale:2.2 });
+      const viewport = page.getViewport({ scale: ESCALA_RENDER_OCR_HV });
       const canvas = document.createElement('canvas');
       canvas.width = viewport.width; canvas.height = viewport.height;
       const ctx = canvas.getContext('2d');
       await page.render({ canvasContext:ctx, viewport }).promise;
-      const { data } = await worker.recognize(canvas);
-      fullText += (data.text||'') + '\n';
+      // Se pide la salida "blocks" para que Tesseract entregue data.words con la posición (bbox) de
+      // cada palabra reconocida — por defecto (sin este parámetro) solo viene data.text, un texto
+      // corrido sin ninguna estructura de columnas, insuficiente para separar etiqueta y valor.
+      const { data } = await worker.recognize(canvas, {}, { blocks:true });
+      if(data.words && data.words.length){
+        lineas.push(...lineasDesdeOcrWords(data.words, ESCALA_RENDER_OCR_HV));
+      } else if(data.text){
+        // Respaldo por si esta versión/configuración de Tesseract no entrega palabras con posición:
+        // se usa el texto corrido tal como antes (mejor que nada, aunque pierda las columnas).
+        lineas.push(...data.text.split('\n').map(l=>l.trim()).filter(Boolean));
+      }
     }
   } finally {
     await worker.terminate();
   }
-  return fullText;
+  return lineas;
 }
 const CARGA_HV_OCR_MIN_CHARS = 25; // si el PDF trae menos texto real que esto, se asume escaneado y se activa OCR
 
@@ -4881,8 +4940,7 @@ async function handleCargaHojaVida(ev){
       let { lineas, paginas } = await extraerLineasPdfConColumnas(pdf);
       if(lineas.join(' ').trim().length < CARGA_HV_OCR_MIN_CHARS){
         if(status) status.textContent = 'Documento escaneado detectado: aplicando OCR…';
-        const fullText = await extraerTextoPdfConOcrGenerico(paginas, status);
-        lineas = fullText.split('\n').map(l=>l.trim()).filter(Boolean);
+        lineas = await extraerTextoPdfConOcrGenerico(paginas, status);
       }
       pares = paresDesdeLineasPdf(lineas);
     }
