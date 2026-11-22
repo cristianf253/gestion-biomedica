@@ -4470,11 +4470,31 @@ function normalizeNumeroLocal(str){
 // cuando el usuario confirma explícitamente que quiere reemplazar los valores ya diligenciados).
 // Devuelve: true (se escribió), 'omitido' (dato válido pero la casilla ya tenía un valor y no se
 // forzó), o false (el valor del documento no se pudo reconocer/convertir para este campo).
+// Unidades/abreviaturas sueltas que aparecen IMPRESAS en la plantilla junto a la casilla de un dato
+// técnico (p.ej. "Hz" junto a Frecuencia, "VAC" junto a Voltaje, "Kg" junto a Peso) incluso cuando esa
+// casilla quedó en blanco en el documento real porque no aplica a ese equipo. En un PDF escaneado, el
+// OCR puede terminar "leyendo" solo esa unidad impresa como si fuera el valor de la fila — se descarta
+// explícitamente, ya que una unidad sola, sin ningún número, nunca es un dato real.
+function esSoloUnidadSuelta(v){
+  const t = String(v||'').toLowerCase().replace(/[\[\]{}()«»"'.,;:\-–—]/g,'').trim();
+  return HV_UNIDADES_SUELTAS.has(t);
+}
+// Campos del bloque "REGISTRO TÉCNICO" (frecuencia, voltaje, corriente, potencia, presión,
+// temperatura, velocidad, humedad, peso, dimensiones, capacidad): por naturaleza son siempre una
+// lectura numérica, así que un valor sin ningún dígito no puede ser un dato real — típicamente es la
+// unidad impresa en la plantilla, o ruido de OCR sobre una casilla que en el documento real quedó en
+// blanco porque ese dato no aplica a ese equipo (p.ej. presión/humedad en un equipo que no las maneja).
+const HV_CAMPOS_ESPECIFICACION_NUMERICA = new Set([
+  'frecuenciaHz','capacidad','voltajeMax','voltajeMin','corrienteMax','corrienteMin',
+  'potencia','presion','temperatura','velocidad','humedad','pesoKg','dimensionesCm',
+]);
 function aplicarValorHojaVida(formEl, campo, valorCrudo, forzar){
   const input = formEl.elements[campo.form];
   if(!input) return false;
   let valor = String(valorCrudo==null?'':valorCrudo).trim();
   if(!valor) return false;
+  if(esSoloUnidadSuelta(valor)) return false;
+  if(HV_CAMPOS_ESPECIFICACION_NUMERICA.has(campo.form) && !/\d/.test(valor)) return false;
   // Un teléfono, código o serie numérico leído de una celda de Excel a veces llega como "3001234567.0"
   // (Excel lo guarda como número, no como texto): se quita el ".0" sobrante salvo que el campo sea
   // explícitamente numérico decimal (costo, vida útil), donde si tiene sentido conservar decimales.
@@ -4832,9 +4852,15 @@ function paresDesdeLineasPdf(lineas){
 // eje Y de Tesseract crece hacia abajo (coordenadas de imagen), al revés que el de pdf.js (que crece
 // hacia arriba), así que aquí el orden de lectura de arriba hacia abajo se obtiene ordenando de forma
 // ascendente en vez de descendente.
+// Una "palabra" reconocida por OCR que no trae ninguna letra ni dígito (p.ej. "[", "]", "|") no es
+// texto real: es el borde de la casilla/cuadro de la plantilla (la línea que delimita dónde va cada
+// valor), que el OCR a veces lee como si fuera un carácter suelto. Si no se descarta, ese corchete
+// queda posicionado justo después de la etiqueta y ANTES del valor real, y el emparejador toma ese
+// corchete como si fuera el valor (p.ej. "SERVICIO" -> "[" en vez de "SERVICIO" -> "CARDIOLOGIA").
+function esRuidoDeBordeOcr(t){ return !/[0-9A-Za-zÀ-ÿ]/.test(String(t||'')); }
 function lineasDesdeOcrWords(words, scale){
   const items = (words||[])
-    .filter(w=>w && w.text && w.text.trim()!=='' && w.bbox)
+    .filter(w=>w && w.text && w.text.trim()!=='' && w.bbox && !esRuidoDeBordeOcr(w.text))
     .map(w=>({
       str: w.text,
       x: w.bbox.x0/scale,
@@ -4871,7 +4897,14 @@ function lineasDesdeOcrWords(words, scale){
 // Devuelve "líneas" (con tabuladores entre columnas, vía lineasDesdeOcrWords) en vez de un texto
 // corrido, para que una hoja de vida escaneada se reconozca igual que una generada digitalmente.
 const CARGA_HV_OCR_MAX_PAGINAS = 20;
-const ESCALA_RENDER_OCR_HV = 2.2;
+// La mayoría de hojas de vida escaneadas llegan de un escáner a unos 200ppp (puntos por pulgada). Una
+// escala de 2.2 (≈158ppp) resulta MENOR a esa resolución nativa, lo que de hecho reduce la nitidez
+// del texto antes de dárselo a Tesseract: en pruebas reales con documentos escaneados, a 158ppp el OCR
+// no lograba leer casi ningún dato real del equipo (solo alcanzaba a leer las etiquetas impresas más
+// grandes), mientras que a 200ppp (escala 200/72) reconocía correctamente nombre, marca, modelo, serie,
+// servicio, etc. Subirla más allá de la resolución nativa del escaneo no aporta nitidez adicional
+// (ya se probó hasta 400ppp sin ninguna mejora extra), así que 200ppp es el punto justo.
+const ESCALA_RENDER_OCR_HV = 200/72;
 async function extraerTextoPdfConOcrGenerico(paginas, statusEl){
   if(!window.Tesseract) throw new Error('Tesseract no disponible');
   const maxPaginas = Math.min(paginas.length, CARGA_HV_OCR_MAX_PAGINAS);
