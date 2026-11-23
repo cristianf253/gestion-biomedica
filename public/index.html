@@ -1190,7 +1190,7 @@ let navStack = [{ screen:'home', label:'Inicio' }];
 let readOnlyMode = false;
 let saveModeKnown = false;
 let isSaving = false;
-let filtros = { invTexto:'', invEstado:'', invServicio:'', invRiesgo:'', ctrDesde:'', ctrHasta:'' };
+let filtros = { invTexto:'', invEstado:'', invServicio:'', invRiesgo:'', invMes:'', ctrDesde:'', ctrHasta:'' };
 let filtroPrevEstado = ''; // '' | 'ejecutado' | 'programado' | 'vencido'
 let filtroPrevServicio = ''; // servicio seleccionado en "Filtrar por servicio"
 let importState = null; // { fileName, rows:[{rowNum, action, issues, data, existingId}] }
@@ -3499,6 +3499,15 @@ function renderHome(){
 /* ================= INVENTARIO ================= */
 function renderInvMenu(){ return renderInvList(); }
 
+// ¿Tiene este equipo al menos un mantenimiento preventivo programado en el mes (0-11) y año dados?
+// Usado por el filtro de mes del Inventario, con el mismo criterio que las columnas de meses.
+function equipoTieneProgramadoEnMes(eqId, year, mes){
+  return state.mantenimientos.some(m=>{
+    if(m.tipo!=='preventivo' || !m.fechaProgramada || m.equipoId!==eqId) return false;
+    const d = new Date(m.fechaProgramada+'T00:00:00');
+    return !isNaN(d) && d.getFullYear()===year && d.getMonth()===mes;
+  });
+}
 function invFiltered(){
   const usr = usuarioActual();
   const base = (usr && inventarioRestringidoPorServicio()) ? equiposEnAlcanceServicioSupervisionUsuario() : state.equipos;
@@ -3506,6 +3515,7 @@ function invFiltered(){
     if(filtros.invEstado && eq.estado!==filtros.invEstado) return false;
     if(filtros.invServicio && eq.servicio!==filtros.invServicio) return false;
     if(filtros.invRiesgo && eq.riesgo!==filtros.invRiesgo) return false;
+    if(filtros.invMes!=='' && !equipoTieneProgramadoEnMes(eq.id, invMesesYear, Number(filtros.invMes))) return false;
     if(filtros.invTexto){
       const t = filtros.invTexto.toLowerCase();
       const hay = [eq.nombre,eq.marca,eq.modelo,eq.serie,eq.codigo,eq.servicio].join(' ').toLowerCase();
@@ -3545,7 +3555,7 @@ function renderInvList(){
   const baseEquipos = filtradoServicio ? equiposEnAlcanceServicioSupervisionUsuario() : state.equipos;
   const list = invFiltered();
   const servicios = [...new Set(baseEquipos.map(e=>e.servicio))].sort();
-  const hayFiltros = filtros.invTexto || filtros.invEstado || filtros.invServicio || filtros.invRiesgo;
+  const hayFiltros = filtros.invTexto || filtros.invEstado || filtros.invServicio || filtros.invRiesgo || filtros.invMes!=='';
 
   // Columnas de meses: resaltan en qué mes tiene cada equipo un mantenimiento preventivo
   // programado en el año seleccionado (mismo criterio de color que el Cronograma).
@@ -3605,6 +3615,10 @@ function renderInvList(){
     <button class="btn btn-sm" onclick="setInvMesesYear(-1)">${icon('arrowLeft',13)}${invMesesYear-1}</button>
     <b style="padding:0 2px;">${invMesesYear}</b>
     <button class="btn btn-sm" onclick="setInvMesesYear(1)">${invMesesYear+1}${icon('chevronRight',13)}</button>
+    <select onchange="setFiltro('invMes', this.value)" title="Muestra solo los equipos con un preventivo programado en ese mes">
+      <option value="">Todos los meses</option>
+      ${MESES_LABEL_LARGO.map((m,i)=>`<option value="${i}" ${String(filtros.invMes)===String(i)?'selected':''}>${m}</option>`).join('')}
+    </select>
     <span class="cell-muted" style="font-size:12px;margin-left:auto;padding-left:14px;border-left:1px solid var(--border);">Código de colores:</span>
     <div class="chart-legend" style="margin:0;">
       <span><i style="background:var(--good)"></i>Completado</span>
@@ -3614,7 +3628,7 @@ function renderInvList(){
     </div>
   </div>
   <div class="table-wrap" style="border-radius:0 0 var(--radius) var(--radius);"><table class="crono-table">
-    <thead><tr>${puedeEditar('inventario')?'<th></th>':''}<th>Equipo</th><th>Activo fijo</th><th>Serie</th><th>Servicio</th><th>INVIMA</th><th>Periodicidad</th><th>Riesgo</th>${MESES_LABEL.map(m=>`<th style="text-align:center;">${m}</th>`).join('')}</tr></thead>
+    <thead><tr>${puedeEditar('inventario')?'<th></th>':''}<th>Equipo</th><th>Activo fijo</th><th>Serie</th><th>Servicio</th><th>INVIMA</th><th>Periodicidad</th><th>Riesgo</th>${MESES_LABEL.map((m,i)=>`<th style="text-align:center;${String(filtros.invMes)===String(i)?'background:var(--accent-soft, rgba(99,102,241,.12));':''}">${m}</th>`).join('')}</tr></thead>
     <tbody>
       ${list.map(eq=>`<tr class="clickable" onclick="go('inv-detail',{id:'${eq.id}'},'${esc(eq.nombre).replace(/'/g,"\\'")}')">
         ${puedeEditar('inventario') ? (puedeEditarEquipoInventario(eq) ? `<td class="row-actions"><button class="btn btn-sm" title="Editar" onclick="event.stopPropagation(); go('inv-edit',{id:'${eq.id}'},'Editar')">${icon('edit',13)}</button></td>` : '<td></td>') : ''}
@@ -3631,7 +3645,7 @@ function renderInvList(){
   </table></div>`}
   `;
 }
-function limpiarFiltrosInv(){ filtros.invTexto=''; filtros.invEstado=''; filtros.invServicio=''; filtros.invRiesgo=''; render(); }
+function limpiarFiltrosInv(){ filtros.invTexto=''; filtros.invEstado=''; filtros.invServicio=''; filtros.invRiesgo=''; filtros.invMes=''; render(); }
 
 /* ---------------- Importar inventario desde Excel ---------------- */
 const IMPORT_HEADER_MAP = {
@@ -4852,15 +4866,22 @@ function paresDesdeLineasPdf(lineas){
 // eje Y de Tesseract crece hacia abajo (coordenadas de imagen), al revés que el de pdf.js (que crece
 // hacia arriba), así que aquí el orden de lectura de arriba hacia abajo se obtiene ordenando de forma
 // ascendente en vez de descendente.
-// Una "palabra" reconocida por OCR que no trae ninguna letra ni dígito (p.ej. "[", "]", "|") no es
-// texto real: es el borde de la casilla/cuadro de la plantilla (la línea que delimita dónde va cada
-// valor), que el OCR a veces lee como si fuera un carácter suelto. Si no se descarta, ese corchete
-// queda posicionado justo después de la etiqueta y ANTES del valor real, y el emparejador toma ese
-// corchete como si fuera el valor (p.ej. "SERVICIO" -> "[" en vez de "SERVICIO" -> "CARDIOLOGIA").
+// El borde de la casilla/cuadro de la plantilla (la línea que delimita dónde va cada valor) a veces
+// el OCR lo lee como si fuera un carácter suelto de corchete o barra — a veces como su PROPIA palabra
+// (p.ej. "SERVICIO" -> "[" -> "CARDIOLOGIA" -> "]") y a veces PEGADO al principio o final de la
+// palabra vecina (p.ej. "[15-93" en vez de "15-93", o "CARDIOLOGIA|"). Si no se recorta/descarta, en
+// el primer caso el emparejador toma ese corchete como si fuera el valor en vez de la palabra real, y
+// en el segundo el corchete queda pegado al valor real en el formulario.
+function limpiarBordeCasillaOcr(t){
+  return String(t||'').replace(/^[\[\]{}|«»]+/, '').replace(/[\[\]{}|«»]+$/, '');
+}
+// Una palabra que, tras ese recorte, no trae ninguna letra ni dígito (p.ej. quedó vacía, o era solo
+// un guion o una coma sueltos) tampoco es texto real: también es ruido de OCR sobre el borde.
 function esRuidoDeBordeOcr(t){ return !/[0-9A-Za-zÀ-ÿ]/.test(String(t||'')); }
 function lineasDesdeOcrWords(words, scale){
   const items = (words||[])
-    .filter(w=>w && w.text && w.text.trim()!=='' && w.bbox && !esRuidoDeBordeOcr(w.text))
+    .map(w=>(w && w.bbox && w.text) ? { bbox:w.bbox, text: limpiarBordeCasillaOcr(w.text) } : null)
+    .filter(w=>w && w.text.trim()!=='' && !esRuidoDeBordeOcr(w.text))
     .map(w=>({
       str: w.text,
       x: w.bbox.x0/scale,
