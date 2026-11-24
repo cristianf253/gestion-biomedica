@@ -1563,13 +1563,47 @@ async function persistLocalOnly(){
 let pendingMutators = []; // { fn, msg } — cambios ya aplicados en memoria, aún sin confirmar en el servidor
 let guardadoEnCurso = false;
 
+// --- FIX bug "se pierde el archivo seleccionado en el selector nativo" ---
+// Antes de este cambio, cualquier guardado disparado por un blur (por ejemplo,
+// al salir del campo "Fecha programada" sin haber guardado) ejecutaba render(),
+// que reconstruye TODO app.innerHTML. Si eso ocurria justo cuando se abria el
+// selector de archivos nativo del sistema operativo (al hacer clic en
+// "Seleccionar archivo"), el <input type="file"> quedaba reemplazado por uno
+// nuevo MIENTRAS el dialogo seguia abierto, y al elegir el archivo y dar
+// "Abrir" el navegador notificaba el cambio al <input> viejo (ya fuera del
+// DOM), por lo que la app actuaba como si no se hubiera seleccionado nada.
+// Esta correccion detecta cuando se va a abrir un selector de archivos y
+// difiere el render() (sin perder el guardado de datos, que sigue ocurriendo
+// de inmediato) hasta que la ventana recupera el foco (o, como respaldo, hasta
+// 4 segundos despues si por algun motivo no se detecta ese regreso de foco).
+let _renderSuprimidoPorDialogoArchivo = false;
+let _renderPendienteTrasDialogo = false;
+let _renderSuprimidoTimeout = null;
+function _liberarSupresionRenderPorDialogo(){
+_renderSuprimidoPorDialogoArchivo = false;
+if(_renderSuprimidoTimeout){ clearTimeout(_renderSuprimidoTimeout); _renderSuprimidoTimeout = null; }
+if(_renderPendienteTrasDialogo){
+_renderPendienteTrasDialogo = false;
+render();
+}
+}
+document.addEventListener('mousedown', function(e){
+var t = e.target;
+if(t && t.tagName === 'INPUT' && t.type === 'file'){
+_renderSuprimidoPorDialogoArchivo = true;
+if(_renderSuprimidoTimeout) clearTimeout(_renderSuprimidoTimeout);
+_renderSuprimidoTimeout = setTimeout(_liberarSupresionRenderPorDialogo, 4000);
+}
+}, true);
+window.addEventListener('focus', _liberarSupresionRenderPorDialogo);
+
 function commit(mutator, successMsg){
   mutator(state);
   pendingMutators.push({ fn: mutator, msg: successMsg===false ? '' : (successMsg || 'Guardado ✓') });
   // Actualiza la pantalla de inmediato con el cambio que ya está en memoria, sin esperar a que
   // termine de guardarse en el servidor: así acciones como "Iniciar intervención" o "Cargar
   // protocolo" se sienten instantáneas aunque el guardado compartido tarde un poco más.
-  render();
+  if(_renderSuprimidoPorDialogoArchivo){ _renderPendienteTrasDialogo = true; } else { render(); }
   if(!guardadoEnCurso){
     guardadoEnCurso = true;
     cicloGuardado();
