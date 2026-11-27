@@ -192,6 +192,13 @@
   .cell-muted{ color:var(--text-3); }
   .row-actions{ display:flex; gap:6px; justify-content:flex-end; align-items:flex-start; }
 
+  /* ---- Bandas de consultorio (Inventario, filtro de servicio = Consulta Externa) ---- */
+  tr.inv-banda td{ padding:8px 14px; font-weight:700; font-size:11.8px; letter-spacing:.03em; text-transform:uppercase; }
+  tr.inv-banda.kind-recepcion td{ background:var(--accent-soft); color:var(--accent); }
+  tr.inv-banda.kind-consultorio td{ background:var(--good-soft); color:var(--good); }
+  tr.inv-banda.kind-especial td{ background:var(--warning-soft); color:var(--warning); }
+  .inv-banda-count{ font-weight:600; text-transform:none; letter-spacing:0; float:right; opacity:.85; }
+
   /* ---- Chips ---- */
   .chip{ display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:999px; font-size:11.5px; font-weight:600; white-space:nowrap; }
   .chip-good{ background:var(--good-soft); color:var(--good); }
@@ -1151,6 +1158,42 @@ function serviciosConocidos(){
     ...state.equipos.map(e=>e.servicioAnterior),
   ])].filter(Boolean).sort((a,b)=>a.localeCompare(b,'es'));
 }
+// Catálogo de consultorios/áreas de Consulta Externa ya usados en el inventario (campo libre
+// "ubicación" de cada equipo) — igual que serviciosConocidos(), el catálogo real son los nombres
+// que ya existen en los datos, no una lista fija. Se usa para el <select> de consultorio en la
+// hoja de vida (solo aparece cuando el servicio es Consulta Externa) y para el filtro de
+// consultorio en Inventario. Ver renderInvForm / renderInvList.
+function consultoriosConocidos(){
+  return [...new Set(
+    state.equipos.filter(e=>e.servicio==='CONSULTA EXTERNA').map(e=>(e.ubicacion||'').trim())
+  )].filter(Boolean).sort(compararConsultorios);
+}
+// Orden "natural" de consultorios: Recepción 1-4 primero, luego Consultorio 1-26 (por número,
+// no alfabético, para que el 10 no quede antes que el 2), luego el resto (Mamá Canguro,
+// Rehabilitación, etc.) en orden alfabético. Usado para ordenar el <select> de la hoja de vida,
+// el filtro de Inventario y las bandas divisorias de la tabla de Inventario.
+function consultorioOrdenKey(label){
+  const s = (label||'').trim().toUpperCase();
+  let grupo = 2;
+  if(/^RECEPCI[OÓ]N/.test(s)) grupo = 0;
+  else if(/^CONSULTORIO/.test(s)) grupo = 1;
+  const m = s.match(/(\d+)/);
+  const num = m ? parseInt(m[1],10) : 9999;
+  return [grupo, num, s];
+}
+function compararConsultorios(a,b){
+  const ka = consultorioOrdenKey(a), kb = consultorioOrdenKey(b);
+  if(ka[0]!==kb[0]) return ka[0]-kb[0];
+  if(ka[1]!==kb[1]) return ka[1]-kb[1];
+  return ka[2].localeCompare(kb[2],'es');
+}
+// Clasifica un consultorio para el color de su banda divisoria en Inventario (ver renderInvList).
+function consultorioKind(label){
+  const s = (label||'').trim().toUpperCase();
+  if(/^RECEPCI[OÓ]N/.test(s)) return 'recepcion';
+  if(/^CONSULTORIO/.test(s)) return 'consultorio';
+  return 'especial';
+}
 const TIPOS_SUG = ['Monitor de signos vitales','Ventilador mecánico','Bomba de infusión','Desfibrilador','Electrobisturí','Incubadora neonatal','Ecógrafo','Autoclave','Equipo de rayos X','Camilla eléctrica','Aspirador de secreciones'];
 const MESES_LABEL = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
 const MESES_LABEL_LARGO = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
@@ -1190,7 +1233,7 @@ let navStack = [{ screen:'home', label:'Inicio' }];
 let readOnlyMode = false;
 let saveModeKnown = false;
 let isSaving = false;
-let filtros = { invTexto:'', invEstado:'', invServicio:'', invRiesgo:'', invMes:'', ctrDesde:'', ctrHasta:'' };
+let filtros = { invTexto:'', invEstado:'', invServicio:'', invConsultorio:'', invRiesgo:'', invMes:'', ctrDesde:'', ctrHasta:'' };
 let filtroPrevEstado = ''; // '' | 'ejecutado' | 'programado' | 'vencido'
 let filtroPrevServicio = ''; // servicio seleccionado en "Filtrar por servicio"
 let importState = null; // { fileName, rows:[{rowNum, action, issues, data, existingId}] }
@@ -3548,6 +3591,7 @@ function invFiltered(){
   const filtrados = base.filter(eq=>{
     if(filtros.invEstado && eq.estado!==filtros.invEstado) return false;
     if(filtros.invServicio && eq.servicio!==filtros.invServicio) return false;
+    if(filtros.invConsultorio && (eq.ubicacion||'').trim()!==filtros.invConsultorio) return false;
     if(filtros.invRiesgo && eq.riesgo!==filtros.invRiesgo) return false;
     if(filtros.invMes!=='' && !equipoTieneProgramadoEnMes(eq.id, invMesesYear, Number(filtros.invMes))) return false;
     if(filtros.invTexto){
@@ -3559,7 +3603,14 @@ function invFiltered(){
   });
   return ordenarInventario(filtrados);
 }
-function setFiltro(key, val){ filtros[key]=val; render(); }
+function setFiltro(key, val){
+  filtros[key]=val;
+  // Si cambian el filtro de servicio a algo distinto de Consulta Externa, el filtro de consultorio
+  // (que solo se muestra para Consulta Externa) queda oculto pero seguiría activo "a ciegas" y
+  // ocultaría equipos sin que se note — se limpia para evitar esa confusión.
+  if(key==='invServicio' && val!=='CONSULTA EXTERNA') filtros.invConsultorio='';
+  render();
+}
 
 // Año que se muestra en las columnas de meses del inventario (resaltan el mantenimiento
 // preventivo programado de cada equipo), independiente del año seleccionado en el Cronograma.
@@ -3589,7 +3640,16 @@ function renderInvList(){
   const baseEquipos = filtradoServicio ? equiposEnAlcanceServicioSupervisionUsuario() : state.equipos;
   const list = invFiltered();
   const servicios = [...new Set(baseEquipos.map(e=>e.servicio))].sort();
-  const hayFiltros = filtros.invTexto || filtros.invEstado || filtros.invServicio || filtros.invRiesgo || filtros.invMes!=='';
+  const hayFiltros = filtros.invTexto || filtros.invEstado || filtros.invServicio || filtros.invConsultorio || filtros.invRiesgo || filtros.invMes!=='';
+
+  // Consulta Externa es el único servicio que, en la práctica, se subdivide por consultorio
+  // (ver campo "ubicación" del equipo / renderInvForm). Cuando el filtro de servicio está puesto
+  // justo en ese valor, se ofrece además un filtro de consultorio y la tabla se agrupa en bandas
+  // por consultorio, en vez de la lista plana habitual.
+  const esConsultaExterna = filtros.invServicio === 'CONSULTA EXTERNA';
+  const consultoriosDisponibles = esConsultaExterna
+    ? [...new Set(baseEquipos.filter(e=>e.servicio==='CONSULTA EXTERNA').map(e=>(e.ubicacion||'').trim()).filter(Boolean))].sort(compararConsultorios)
+    : [];
 
   // Columnas de meses: resaltan en qué mes tiene cada equipo un mantenimiento preventivo
   // programado en el año seleccionado (mismo criterio de color que el Cronograma).
@@ -3618,6 +3678,38 @@ function renderInvList(){
     const extra = items.length>1 ? `<span class="crono-extra">+${items.length-1}</span>` : '';
     return `<td class="crono-cell crono-cell-filled"><button class="crono-fill tone-${tone}" onclick="event.stopPropagation(); go('mant-detalle',{id:'${m.id}'},'Mantenimiento')" title="${esc(eq.nombre)} · ${esc(MANT_ESTADOS[m.estado]?.label||m.estado)} · ${fmtDate(m.fechaProgramada)}">${extra}</button></td>`;
   }
+  function filaInvHtml(eq){
+    return `<tr class="clickable" onclick="go('inv-detail',{id:'${eq.id}'},'${esc(eq.nombre).replace(/'/g,"\\'")}')">
+        ${puedeEditar('inventario') ? (puedeEditarEquipoInventario(eq) ? `<td class="row-actions"><button class="btn btn-sm" title="Editar" onclick="event.stopPropagation(); go('inv-edit',{id:'${eq.id}'},'Editar')">${icon('edit',13)}</button></td>` : '<td></td>') : ''}
+        <td><b>${esc(eq.nombre)}</b><div class="cell-muted" style="font-size:11.5px;">${esc(eq.marca)} ${esc(eq.modelo)}</div></td>
+        <td class="mono cell-num">${esc(eq.codigo)}</td>
+        <td class="mono" style="font-size:12.5px;">${eq.serie ? esc(eq.serie) : `<span class="cell-muted">—</span>`}</td>
+        <td>${esc(eq.servicio)}</td>
+        <td style="font-size:12.5px;">${(eq.registroSanitario || (eq.registroInvima?REGISTRO_INVIMA_OPTIONS[eq.registroInvima]:'')) ? esc(eq.registroSanitario || REGISTRO_INVIMA_OPTIONS[eq.registroInvima]) : `<span class="cell-muted">Sin INVIMA</span>`}</td>
+        <td style="font-size:12.5px;">${frecuenciaLabel(eq.frecuenciaPreventivaMeses)}</td>
+        <td>${esc(eq.riesgo)}</td>
+        ${MESES_LABEL.map((_,i)=>celdaInv(eq,i)).join('')}
+      </tr>`;
+  }
+  // Agrupa la lista ya filtrada por consultorio (campo "ubicación"), ordenando los grupos con
+  // compararConsultorios() y dejando los equipos sin consultorio asignado al final.
+  function agruparPorConsultorio(items){
+    const SIN = '(Sin consultorio asignado)';
+    const grupos = {}; const orden = [];
+    items.forEach(eq=>{
+      const key = (eq.ubicacion||'').trim() || SIN;
+      if(!grupos[key]){ grupos[key]=[]; orden.push(key); }
+      grupos[key].push(eq);
+    });
+    orden.sort((a,b)=> a===SIN ? 1 : b===SIN ? -1 : compararConsultorios(a,b));
+    return orden.map(k=>({ label:k, kind: k===SIN ? 'especial' : consultorioKind(k), items:grupos[k] }));
+  }
+  function bandaConsultorioHtml(grupo){
+    return `<tr class="inv-banda kind-${grupo.kind}"><td colspan="30">${esc(grupo.label)}<span class="inv-banda-count">${grupo.items.length} equipo${grupo.items.length===1?'':'s'}</span></td></tr>`;
+  }
+  const filasHtml = esConsultaExterna
+    ? agruparPorConsultorio(list).map(grupo => bandaConsultorioHtml(grupo) + grupo.items.map(filaInvHtml).join('')).join('')
+    : list.map(filaInvHtml).join('');
 
   return `
   <div class="page-head"><h1>Inventario</h1><p>${filtradoServicio ? `Inventario de tus servicios y/o contratos asignados: ${baseEquipos.length} equipo(s) registrados.` : `Inventario global: ${state.equipos.length} equipo(s) registrados en total.${(usr && usr.rol==='biomedico_administrativo') ? ' Puedes editar únicamente los equipos de tus servicios asignados.' : ''}`}</p></div>
@@ -3632,6 +3724,10 @@ function renderInvList(){
       <option value="">Todos los servicios</option>
       ${serviciosOptionsAgrupadas(servicios, usr, filtradoServicio, filtros.invServicio)}
     </select>
+    ${esConsultaExterna ? `<select onchange="setFiltro('invConsultorio', this.value)" title="Filtrar consultorio">
+      <option value="">Todos los consultorios</option>
+      ${consultoriosDisponibles.map(c=>`<option value="${esc(c)}" ${filtros.invConsultorio===c?'selected':''}>${esc(c)}</option>`).join('')}
+    </select>` : ''}
     <select onchange="setFiltro('invRiesgo', this.value)">
       <option value="">Toda clasificación</option>
       ${Object.keys(RIESGOS).map(k=>`<option value="${k}" ${filtros.invRiesgo===k?'selected':''}>${k}</option>`).join('')}
@@ -3664,22 +3760,12 @@ function renderInvList(){
   <div class="table-wrap" style="border-radius:0 0 var(--radius) var(--radius);"><table class="crono-table">
     <thead><tr>${puedeEditar('inventario')?'<th></th>':''}<th>Equipo</th><th>Activo fijo</th><th>Serie</th><th>Servicio</th><th>INVIMA</th><th>Periodicidad</th><th>Riesgo</th>${MESES_LABEL.map((m,i)=>`<th style="text-align:center;${String(filtros.invMes)===String(i)?'background:var(--accent-soft, rgba(99,102,241,.12));':''}">${m}</th>`).join('')}</tr></thead>
     <tbody>
-      ${list.map(eq=>`<tr class="clickable" onclick="go('inv-detail',{id:'${eq.id}'},'${esc(eq.nombre).replace(/'/g,"\\'")}')">
-        ${puedeEditar('inventario') ? (puedeEditarEquipoInventario(eq) ? `<td class="row-actions"><button class="btn btn-sm" title="Editar" onclick="event.stopPropagation(); go('inv-edit',{id:'${eq.id}'},'Editar')">${icon('edit',13)}</button></td>` : '<td></td>') : ''}
-        <td><b>${esc(eq.nombre)}</b><div class="cell-muted" style="font-size:11.5px;">${esc(eq.marca)} ${esc(eq.modelo)}</div></td>
-        <td class="mono cell-num">${esc(eq.codigo)}</td>
-        <td class="mono" style="font-size:12.5px;">${eq.serie ? esc(eq.serie) : `<span class="cell-muted">—</span>`}</td>
-        <td>${esc(eq.servicio)}</td>
-        <td style="font-size:12.5px;">${(eq.registroSanitario || (eq.registroInvima?REGISTRO_INVIMA_OPTIONS[eq.registroInvima]:'')) ? esc(eq.registroSanitario || REGISTRO_INVIMA_OPTIONS[eq.registroInvima]) : `<span class="cell-muted">Sin INVIMA</span>`}</td>
-        <td style="font-size:12.5px;">${frecuenciaLabel(eq.frecuenciaPreventivaMeses)}</td>
-        <td>${esc(eq.riesgo)}</td>
-        ${MESES_LABEL.map((_,i)=>celdaInv(eq,i)).join('')}
-      </tr>`).join('')}
+      ${filasHtml}
     </tbody>
   </table></div>`}
   `;
 }
-function limpiarFiltrosInv(){ filtros.invTexto=''; filtros.invEstado=''; filtros.invServicio=''; filtros.invRiesgo=''; filtros.invMes=''; render(); }
+function limpiarFiltrosInv(){ filtros.invTexto=''; filtros.invEstado=''; filtros.invServicio=''; filtros.invConsultorio=''; filtros.invRiesgo=''; filtros.invMes=''; render(); }
 
 /* ---------------- Importar inventario desde Excel ---------------- */
 const IMPORT_HEADER_MAP = {
@@ -5068,12 +5154,12 @@ async function handleCargaHojaVida(ev){
 // que se está editando ya tenía guardado un valor que NO está en la lista conocida (datos antiguos,
 // de antes de esta estandarización), se agrega igual como una opción propia para no perderlo ni
 // obligar a cambiarlo sin querer.
-function renderCampoServicioEstandarizado({ name, nuevoName, campoId, label, hint, required, valorActual }){
+function renderCampoServicioEstandarizado({ name, nuevoName, campoId, label, hint, required, valorActual, extraOnChange }){
   const conocidos = serviciosConocidos();
   const valorEsConocido = !valorActual || conocidos.includes(valorActual);
   return `
   <div class="field"><label>${esc(label)}${hint?` <span class="hint">${esc(hint)}</span>`:''}</label>
-    <select name="${esc(name)}" ${required?'required':''} onchange="document.getElementById('${esc(campoId)}').style.display = this.value==='__nuevo__' ? '' : 'none';">
+    <select name="${esc(name)}" ${required?'required':''} onchange="document.getElementById('${esc(campoId)}').style.display = this.value==='__nuevo__' ? '' : 'none'; ${extraOnChange||''}">
       <option value="" ${!valorActual?'selected':''}>${required?'— Selecciona un servicio —':'— Ninguno —'}</option>
       ${!valorEsConocido ? `<option value="${esc(valorActual)}" selected>${esc(valorActual)}</option>` : ''}
       ${conocidos.map(s=>`<option value="${esc(s)}" ${valorActual===s?'selected':''}>${esc(s)}</option>`).join('')}
@@ -5084,6 +5170,45 @@ function renderCampoServicioEstandarizado({ name, nuevoName, campoId, label, hin
     <label>Nombre del servicio nuevo</label>
     <input name="${esc(nuevoName)}" placeholder="Escribe el nombre exacto del nuevo servicio"/>
   </div>`;
+}
+// Campo "ubicación" de la hoja de vida: texto libre para la mayoría de servicios, pero un
+// <select> de consultorios conocidos (+ opción para agregar uno nuevo) cuando el servicio es
+// Consulta Externa — ver renderInvForm / actualizarCampoUbicacionPorServicio.
+function campoUbicacionHtml(servicioVal, valorActual){
+  if(servicioVal !== 'CONSULTA EXTERNA'){
+    return `<label>Ubicación específica</label><input name="ubicacion" value="${esc(valorActual||'')}" placeholder="Ej. Piso 3, cama 5"/>`;
+  }
+  const conocidos = consultoriosConocidos();
+  const valorEsConocido = !valorActual || conocidos.includes(valorActual);
+  return `<label>Consultorio</label>
+    <select name="ubicacion" onchange="document.getElementById('campo-consultorio-nuevo').style.display = this.value==='__nuevo__' ? '' : 'none';">
+      <option value="" ${!valorActual?'selected':''}>— Sin asignar —</option>
+      ${!valorEsConocido ? `<option value="${esc(valorActual)}" selected>${esc(valorActual)}</option>` : ''}
+      ${conocidos.map(c=>`<option value="${esc(c)}" ${valorActual===c?'selected':''}>${esc(c)}</option>`).join('')}
+      <option value="__nuevo__">+ Agregar un consultorio nuevo…</option>
+    </select>
+    <div class="field" id="campo-consultorio-nuevo" style="display:none;margin-top:8px;">
+      <label>Nombre del consultorio nuevo</label>
+      <input name="ubicacionNueva" placeholder="Ej. Consultorio 27"/>
+    </div>`;
+}
+// Se llama desde el onchange del <select> de servicio (ver renderCampoServicioEstandarizado /
+// extraOnChange) para que el campo de ubicación cambie entre texto libre y <select> de
+// consultorio sin perder lo que la persona ya había escrito o elegido.
+function actualizarCampoUbicacionPorServicio(servicioVal){
+  const wrap = document.getElementById('campo-ubicacion-wrap');
+  if(!wrap) return;
+  const campoActual = wrap.querySelector('[name="ubicacion"]');
+  let valorActual = '';
+  if(campoActual){
+    if(campoActual.tagName==='SELECT' && campoActual.value==='__nuevo__'){
+      const nuevoInput = wrap.querySelector('[name="ubicacionNueva"]');
+      valorActual = nuevoInput ? nuevoInput.value.trim() : '';
+    } else {
+      valorActual = campoActual.value.trim();
+    }
+  }
+  wrap.innerHTML = campoUbicacionHtml(servicioVal, valorActual);
 }
 let ultimaCargaHojaVida = null;
 function confirmarSobrescribirHojaVida(){
@@ -5133,8 +5258,8 @@ function renderInvForm(id){
     <div class="section-title">Ubicación y responsable</div>
     <div class="formgrid">
       ${renderCampoServicioEstandarizado({ name:'servicioAnterior', nuevoName:'servicioAnteriorNuevo', campoId:'campo-servicio-anterior-nuevo', label:'Servicio anterior', hint:'(si aplica)', required:false, valorActual:eq?.servicioAnterior||'' })}
-      ${renderCampoServicioEstandarizado({ name:'servicio', nuevoName:'servicioNuevo', campoId:'campo-servicio-nuevo', label:'Servicio actual', required:true, valorActual:eq?.servicio||'' })}
-      <div class="field"><label>Ubicación específica</label><input name="ubicacion" value="${esc(eq?.ubicacion||'')}" placeholder="Ej. Piso 3, cama 5"/></div>
+      ${renderCampoServicioEstandarizado({ name:'servicio', nuevoName:'servicioNuevo', campoId:'campo-servicio-nuevo', label:'Servicio actual', required:true, valorActual:eq?.servicio||'', extraOnChange:"actualizarCampoUbicacionPorServicio(this.value==='__nuevo__' ? '' : this.value);" })}
+      <div class="field" id="campo-ubicacion-wrap">${campoUbicacionHtml(eq?.servicio||'', eq?.ubicacion||'')}</div>
       <div class="field"><label>Responsable</label><select name="responsableId"><option value="">— Sin asignar —</option>${responsableOptions(eq?.responsableId)}</select></div>
       <div class="field"><label>Estado</label><select name="estado" onchange="document.getElementById('campo-motivo-fs').style.display = this.value==='fuera_servicio' ? '' : 'none';">${Object.entries(ESTADOS_EQUIPO).map(([k,v])=>`<option value="${k}" ${eq?.estado===k?'selected':''}>${v.label}</option>`).join('')}</select></div>
       <div class="field" id="campo-motivo-fs" style="display:${eq?.estado==='fuera_servicio'?'':'none'};"><label>Motivo fuera de servicio</label><input name="motivoFueraServicio" value="${esc(eq?.motivoFueraServicio||'')}" placeholder="Ej. Sin batería, sin celda de O2"/></div>
@@ -5303,7 +5428,8 @@ function submitInvForm(ev, id){
     nombre: f.nombre.value.trim(), tipo: f.nombre.value.trim(), codigo: f.codigo.value.trim(),
     marca: f.marca.value.trim(), modelo: f.modelo.value.trim(), serie: f.serie.value.trim(),
     riesgo: f.riesgo.value,
-    servicioAnterior: servicioAnteriorVal, servicio: servicioVal, ubicacion: f.ubicacion.value.trim(),
+    servicioAnterior: servicioAnteriorVal, servicio: servicioVal,
+    ubicacion: f.ubicacion.value==='__nuevo__' ? (f.ubicacionNueva?f.ubicacionNueva.value:'').trim() : f.ubicacion.value.trim(),
     estado: f.estado.value, motivoFueraServicio: f.motivoFueraServicio.value.trim(),
     responsableId: f.responsableId.value || null,
     registroSanitario: f.registroSanitario.value.trim(),
